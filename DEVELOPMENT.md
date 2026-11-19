@@ -61,7 +61,7 @@ pnpm coverage
 
 GitHub Actions (`.github/workflows/ci.yml`) builds and tests both stacks on Linux, Windows, and macOS for every push to `master`, `develop`, and `release/**` and for every pull request. Formatting and lint checks run on pull requests. Pushes to `develop` also upload coverage from both stacks to Codecov, which needs the repository secret `CODECOV_TOKEN`.
 
-`.github/workflows/cd.yml` runs when `package.json` changes on `master`: it builds and tests, tags `v<version>` if that tag doesn't exist, and merges `master` into `develop`. It doesn't build or publish installers.
+`.github/workflows/cd.yml` runs when `package.json` changes on `master`: it builds and tests, tags `v<version>` if that tag doesn't exist, and merges `master` into `develop`. When it created a new tag, a `publish` job then builds the installers on Windows (NSIS `.exe`) and Linux (`.deb`, `.rpm`, and AppImage) with `tauri-apps/tauri-action` and attaches them to a GitHub release for that tag. The installers are unsigned. The bundle formats are set in `bundle.targets` in `src-tauri/tauri.conf.json`.
 
 To release: bump `version` in `package.json`, `src-tauri/tauri.conf.json`, and both crate `Cargo.toml`s in one commit on the `release/*` branch, verify the build, and merge to `master` with `--no-ff`.
 
