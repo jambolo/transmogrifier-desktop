@@ -4606,7 +4606,7 @@ dependencies = [
 
 [[package]]
 name = "transmogrifier-desktop"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "keyring",
  "serde",
@@ -4621,7 +4621,7 @@ dependencies = [
 
 [[package]]
 name = "transmogrifier-desktop-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "async-trait",
  "futures-util",
