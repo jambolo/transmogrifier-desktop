@@ -1,32 +1,16 @@
-//! Compute core — all non-UI logic lives here.
+//! Transmogrifier's core: everything the app does that isn't a window.
 //!
-//! This crate knows nothing about Tauri, the webview, or any UI. That
-//! separation is deliberate: it lets the logic be unit-tested, benchmarked,
-//! or reused headless without a GUI. Grow the application by adding logic
-//! (and its tests) here, then exposing it through a thin command in the
-//! `src-tauri` shell.
+//! This crate has no Tauri dependency. The shell (`src-tauri`) owns the windows and exposes these modules to
+//! the web UI as commands.
+//!
+//! - [`llm`]: the provider-neutral [`llm::LlmProvider`] interface, with `anthropic` and `openai` adapters.
+//! - [`agent`]: the generation loop, the system prompt, and the tool definitions and executor.
+//! - [`project`]: project storage (files, metadata, conversation history) and zip export/import.
+//! - [`settings`]: provider and model selection, limits, and API-key storage.
+//! - [`runtime`]: serving a generated app to its window and collecting its console.
 
-/// Build the greeting shown by the sample UI.
-pub fn greeting(name: &str) -> String {
-    let name = name.trim();
-    if name.is_empty() {
-        "Hello from the Rust core!".to_string()
-    } else {
-        format!("Hello, {name}, from the Rust core!")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn greets_by_name() {
-        assert_eq!(greeting("world"), "Hello, world, from the Rust core!");
-    }
-
-    #[test]
-    fn falls_back_when_the_name_is_blank() {
-        assert_eq!(greeting("  "), "Hello from the Rust core!");
-    }
-}
+pub mod agent;
+pub mod llm;
+pub mod project;
+pub mod runtime;
+pub mod settings;

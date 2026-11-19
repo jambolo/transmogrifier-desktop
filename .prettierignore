@@ -8,3 +8,4 @@ src-tauri/icons/
 *.md
 *.yaml
 *.yml
+docs/
