@@ -1,6 +1,6 @@
 [package]
 name = "transmogrifier-desktop-core"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 description = "UI-agnostic compute core. All application logic lives here; the Tauri shell stays thin."
 
@@ -15,7 +15,7 @@ thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt", "macros", "time", "sync"] }
 tokio-util = "0.7.20"
 uuid = { version = "1.29.3", features = ["v4"] }
-zip = { version = "9.7.1", default-features = false, features = ["deflate"] }
+zip = { version = "9.7.3", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
