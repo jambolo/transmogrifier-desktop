@@ -50,6 +50,8 @@ describe('api', () => {
     await api.exportProject('p1', true);
     await api.pickArchive();
     await api.importArchive('/tmp/a.zip', false);
+    await api.createShortcut('p1');
+    await api.takeLaunchRequest();
     await api.openExternal('https://example.com');
     expect(calls).toEqual([
       { cmd: 'get_settings', args: {} },
@@ -69,6 +71,8 @@ describe('api', () => {
       { cmd: 'export_project', args: { id: 'p1', backup: true } },
       { cmd: 'pick_archive', args: {} },
       { cmd: 'import_archive', args: { path: '/tmp/a.zip', withConversation: false } },
+      { cmd: 'create_shortcut', args: { id: 'p1' } },
+      { cmd: 'take_launch_request', args: {} },
       { cmd: 'open_external', args: { url: 'https://example.com' } },
     ]);
   });
@@ -84,13 +88,17 @@ describe('api', () => {
     mockIPC(() => null, { shouldMockEvents: true });
     const finished: string[] = [];
     const links: string[] = [];
+    const launches: string[] = [];
+    await api.onLaunch((projectId) => launches.push(projectId));
     const stop = await api.onGenerationFinished((projectId) => finished.push(projectId));
     await api.onExternalLink((url) => links.push(url));
     await emit('generation-finished', { projectId: 'p1' });
     await emit('external-link', { url: 'https://example.com' });
+    await emit('launch', { projectId: 'p3' });
     stop();
     await emit('generation-finished', { projectId: 'p2' });
     expect(finished).toEqual(['p1']);
     expect(links).toEqual(['https://example.com']);
+    expect(launches).toEqual(['p3']);
   });
 });

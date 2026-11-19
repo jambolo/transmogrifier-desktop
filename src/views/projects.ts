@@ -70,6 +70,7 @@ export function createProjectsView(api: Api, handlers: ProjectsHandlers) {
       item(text.rename, () => void rename(project)),
       item(text.exportSite, () => void exportApp(project, false)),
       item(text.backUp, () => void exportApp(project, true)),
+      item(text.createShortcut, () => void createShortcut(project)),
       item(text.deleteApp, () => void remove(project), true),
     );
     const more = button({
@@ -139,6 +140,15 @@ export function createProjectsView(api: Api, handlers: ProjectsHandlers) {
       if (path !== null) toast(text.exported(path));
     } catch (error) {
       toast(text.exportFailed(errorMessage(error)), true);
+    }
+  }
+
+  async function createShortcut(project: Project): Promise<void> {
+    try {
+      await api.createShortcut(project.id);
+      toast(text.shortcutCreated);
+    } catch (error) {
+      toast(text.shortcutFailed(errorMessage(error)), true);
     }
   }
 

@@ -39,6 +39,20 @@ function showWorkspace(id: string): void {
   workspace.load(id).catch(fail);
 }
 
+/** Opens what a shortcut asked for: the app if it has files, its chat if not, or the list if it's gone. */
+async function openRequested(id: string): Promise<void> {
+  let requested;
+  try {
+    requested = await api.getProject(id);
+  } catch {
+    showProjects();
+    toast(text.shortcutAppMissing, true);
+    return;
+  }
+  showWorkspace(id);
+  if (requested.files.length > 0) api.runApp(id).catch(fail);
+}
+
 function showSettings(): void {
   show(settings);
   settings.load().catch(fail);
@@ -58,7 +72,10 @@ async function start(): Promise<void> {
         if (confirmed) api.openExternal(url).catch(fail);
       });
     }),
+    api.onLaunch((id) => void openRequested(id)),
   ]);
+  const requested = await api.takeLaunchRequest();
+  if (requested !== null) return openRequested(requested);
   // Without a key nothing can be made, so the first launch starts in Settings.
   const saved = await api.getSettings();
   if (Object.keys(saved.keyHints).length === 0) showSettings();
