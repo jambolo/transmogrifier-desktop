@@ -3,3 +3,20 @@ name = "transmogrifier-desktop-core"
 version = "0.1.0"
 edition = "2024"
 description = "UI-agnostic compute core. All application logic lives here; the Tauri shell stays thin."
+
+[dependencies]
+async-trait = "0.1.92"
+futures-util = "0.3.34"
+regex = "1.13.2"
+reqwest = { version = "0.13.5", default-features = false, features = ["native-tls", "stream", "json", "system-proxy"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt", "macros", "time", "sync"] }
+tokio-util = "0.7.20"
+uuid = { version = "1.29.3", features = ["v4"] }
+zip = { version = "9.7.1", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "test-util"] }
