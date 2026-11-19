@@ -1,6 +1,6 @@
 {
   "name": "transmogrifier-desktop",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Little apps. For right now.",
   "private": true,
   "type": "module",
