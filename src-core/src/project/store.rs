@@ -36,6 +36,10 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub provider: ProviderId,
+    /// The saved connection the project uses, when its provider can have several. Its ID only means
+    /// something on the install that saved it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<String>,
     pub model: String,
     pub created_at_millis: i64,
     pub updated_at_millis: i64,
@@ -96,7 +100,7 @@ pub enum NoticeKind {
     /// The API key is missing or was rejected.
     AuthFailed,
     Failed,
-    /// The project's provider isn't available in this version of the app.
+    /// The project's provider isn't available: this version doesn't have it, or its connection isn't set up.
     ProviderUnavailable,
     /// The project was imported without its conversation; the model starts again from the current files.
     ImportedWithoutConversation,
@@ -186,13 +190,15 @@ impl ProjectStore {
         read_project(&self.dir(id)?)
     }
 
-    pub fn create(&self, name: &str, provider: ProviderId, model: &str) -> Result<Project, StoreError> {
+    /// `connection` names the saved connection, for a provider that can have several.
+    pub fn create(&self, name: &str, provider: ProviderId, model: &str, connection: Option<&str>) -> Result<Project, StoreError> {
         let _guard = self.guard();
         let now = (self.clock)();
         let project = Project {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.to_string(),
             provider,
+            connection: connection.map(str::to_string),
             model: model.to_string(),
             created_at_millis: now,
             updated_at_millis: now,
@@ -207,6 +213,26 @@ impl ProjectStore {
     pub fn rename(&self, id: &str, name: &str) -> Result<(), StoreError> {
         let _guard = self.guard();
         self.touch(id, |project| project.name = name.to_string())
+    }
+
+    /// Moves the project to another connection and model. A conversation can't continue in another provider's
+    /// format, so a change of provider resets it.
+    pub fn set_service(&self, id: &str, provider: ProviderId, model: &str, connection: Option<&str>) -> Result<(), StoreError> {
+        let reset = {
+            let _guard = self.guard();
+            self.existing_dir(id)?;
+            self.touch(id, |project| {
+                project.provider = provider;
+                project.connection = connection.map(str::to_string);
+                project.model = model.to_string();
+            })?;
+            self.read_conversation(id)?
+                .is_some_and(|old| old.history.provider != provider)
+        };
+        if reset {
+            self.reset_conversation(id)?;
+        }
+        Ok(())
     }
 
     pub fn delete(&self, id: &str) -> Result<(), StoreError> {
@@ -358,7 +384,7 @@ mod tests {
     fn project_json_matches_the_shared_layout() {
         let (dir, store) = store();
         let project = store
-            .create("Tip calculator", ProviderId::Anthropic, "claude-opus-5-5")
+            .create("Tip calculator", ProviderId::Anthropic, "claude-opus-5-5", None)
             .unwrap();
         let text = fs::read_to_string(dir.path().join(&project.id).join("project.json")).unwrap();
         assert_eq!(
@@ -468,7 +494,7 @@ mod tests {
     #[test]
     fn unknown_fields_survive_a_rewrite() {
         let (dir, store) = store();
-        let project = store.create("A", ProviderId::Anthropic, "m").unwrap();
+        let project = store.create("A", ProviderId::Anthropic, "m", None).unwrap();
         let file = dir.path().join(&project.id).join("conversation.json");
         fs::write(&file, r#"{"history":{"provider":"ANTHROPIC"},"future":{"x":1}}"#).unwrap();
         let conversation = store.conversation(&project.id).unwrap().unwrap();
@@ -479,8 +505,8 @@ mod tests {
     #[test]
     fn lists_projects_most_recently_updated_first() {
         let (_dir, store) = store();
-        let first = store.create("First", ProviderId::Anthropic, "m").unwrap();
-        let second = store.create("Second", ProviderId::Openai, "m").unwrap();
+        let first = store.create("First", ProviderId::Anthropic, "m", None).unwrap();
+        let second = store.create("Second", ProviderId::Openai, "m", None).unwrap();
         assert_eq!(
             store.projects().iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
             ["Second", "First"]
@@ -498,7 +524,7 @@ mod tests {
     #[test]
     fn appending_to_the_transcript_touches_the_project_and_skips_unreadable_lines() {
         let (dir, store) = store();
-        let project = store.create("A", ProviderId::Anthropic, "m").unwrap();
+        let project = store.create("A", ProviderId::Anthropic, "m", None).unwrap();
         store
             .append_transcript(&project.id, &TranscriptEntry::Reply { text: "one".into() })
             .unwrap();
@@ -528,7 +554,7 @@ mod tests {
     #[test]
     fn conversation_history_is_append_only_per_provider() {
         let (_dir, store) = store();
-        let project = store.create("A", ProviderId::Anthropic, "m").unwrap();
+        let project = store.create("A", ProviderId::Anthropic, "m", None).unwrap();
         assert_eq!(store.conversation(&project.id).unwrap(), None);
         let mut conversation = Conversation::new(ProviderId::Anthropic);
         conversation.history.items = vec![json!(1), json!(2)];
@@ -553,7 +579,7 @@ mod tests {
     #[test]
     fn resetting_the_conversation_keeps_the_transcript_and_site() {
         let (_dir, store) = store();
-        let project = store.create("A", ProviderId::Anthropic, "m").unwrap();
+        let project = store.create("A", ProviderId::Anthropic, "m", None).unwrap();
         store
             .append_transcript(&project.id, &TranscriptEntry::Reply { text: "one".into() })
             .unwrap();
@@ -583,5 +609,54 @@ mod tests {
             assert_eq!(store.project(id), None);
             assert!(store.workspace(id).is_err());
         }
+    }
+
+    #[test]
+    fn a_project_names_its_connection_only_when_it_has_one() {
+        let (dir, store) = store();
+        let project = store
+            .create("Tips", ProviderId::OpenaiCompatible, "qwen3-coder", Some("c1"))
+            .unwrap();
+        let file = dir.path().join(&project.id).join("project.json");
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            format!(
+                r#"{{"id":"{}","name":"Tips","provider":"OPENAI_COMPATIBLE","connection":"c1","model":"qwen3-coder","createdAtMillis":1000,"updatedAtMillis":1000}}"#,
+                project.id
+            )
+        );
+        assert_eq!(store.project(&project.id).unwrap().connection.as_deref(), Some("c1"));
+    }
+
+    #[test]
+    fn changing_the_service_keeps_the_conversation_unless_the_provider_changes() {
+        let (_dir, store) = store();
+        let project = store
+            .create("Tips", ProviderId::OpenaiCompatible, "qwen3-coder", Some("c1"))
+            .unwrap();
+        let mut conversation = Conversation::new(ProviderId::OpenaiCompatible);
+        conversation.history.items.push(json!({"role": "user"}));
+        store.save_conversation(&project.id, &conversation).unwrap();
+
+        // Another server speaks the same format.
+        store
+            .set_service(&project.id, ProviderId::OpenaiCompatible, "gemma4", Some("c2"))
+            .unwrap();
+        let moved = store.project(&project.id).unwrap();
+        assert_eq!((moved.connection.as_deref(), moved.model.as_str()), (Some("c2"), "gemma4"));
+        assert_eq!(store.conversation(&project.id).unwrap(), Some(conversation));
+        assert!(store.transcript(&project.id).is_empty());
+
+        store
+            .set_service(&project.id, ProviderId::Anthropic, "claude-opus-5-5", None)
+            .unwrap();
+        let moved = store.project(&project.id).unwrap();
+        assert_eq!((moved.provider, moved.connection), (ProviderId::Anthropic, None));
+        assert_eq!(store.conversation(&project.id).unwrap(), None);
+        assert_eq!(
+            store.transcript(&project.id),
+            [TranscriptEntry::notice(NoticeKind::ConversationReset)]
+        );
+        assert!(store.set_service("missing", ProviderId::Anthropic, "m", None).is_err());
     }
 }

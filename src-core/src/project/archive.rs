@@ -55,10 +55,11 @@ impl From<zip::result::ZipError> for ArchiveError {
     }
 }
 
-/// Default provider and model for an archive that holds only a site.
+/// The provider, connection, and model for an archive that holds only a site.
 #[derive(Debug, Clone)]
 pub struct ImportDefaults {
     pub provider: ProviderId,
+    pub connection: Option<String>,
     pub model: String,
 }
 
@@ -76,6 +77,11 @@ pub struct ArchiveContents {
 impl ArchiveContents {
     pub fn has_conversation(&self) -> bool {
         self.conversation.is_some()
+    }
+
+    /// Whether the archive is a backup, which says what service made the app; a site-only archive doesn't.
+    pub fn has_project(&self) -> bool {
+        self.project.is_some()
     }
 }
 
@@ -150,6 +156,8 @@ pub fn import(
         &contents.name,
         source.map_or(defaults.provider, |p| p.provider),
         source.map_or(defaults.model.as_str(), |p| p.model.as_str()),
+        // A backup's connection is kept: it is found again on the install that made the backup.
+        source.map_or(defaults.connection.as_deref(), |p| p.connection.as_deref()),
     )?;
     let fill = || -> Result<(), ArchiveError> {
         let workspace = store.workspace(&project.id)?;
@@ -308,8 +316,9 @@ mod tests {
 
     fn defaults() -> ImportDefaults {
         ImportDefaults {
-            provider: ProviderId::Openai,
-            model: "gpt-6.1-sol".into(),
+            provider: ProviderId::OpenaiCompatible,
+            connection: Some("c1".into()),
+            model: "gemma4".into(),
         }
     }
 
@@ -326,7 +335,7 @@ mod tests {
     }
 
     fn sample(store: &ProjectStore) -> Project {
-        let project = store.create("Tips", ProviderId::Anthropic, "claude-opus-5-5").unwrap();
+        let project = store.create("Tips", ProviderId::Anthropic, "claude-opus-5-5", None).unwrap();
         let workspace = store.workspace(&project.id).unwrap();
         workspace.write("index.html", "<h1>Tips</h1>").unwrap();
         workspace.write("js/app.js", "let a;").unwrap();
@@ -374,12 +383,18 @@ mod tests {
         );
 
         let contents = read(bytes, "ignored").unwrap();
-        assert!(contents.has_conversation());
+        assert!(contents.has_conversation() && contents.has_project());
         let with = import(&store, &contents, &defaults(), true).unwrap();
         assert_ne!(with.id, project.id);
+        // A backup keeps its own service, not the one for new apps.
         assert_eq!(
-            (with.name.as_str(), with.provider, with.model.as_str()),
-            ("Tips", ProviderId::Anthropic, "claude-opus-5-5")
+            (
+                with.name.as_str(),
+                with.provider,
+                with.connection.as_deref(),
+                with.model.as_str()
+            ),
+            ("Tips", ProviderId::Anthropic, None, "claude-opus-5-5")
         );
         assert_eq!(store.workspace(&with.id).unwrap().read("js/app.js").unwrap(), "let a;");
         assert_eq!(
@@ -400,9 +415,17 @@ mod tests {
     fn site_only_zip_uses_the_file_name_and_defaults() {
         let (_dir, store) = store();
         let contents = read(zip_of(&[("index.html", "x"), ("css/a.css", "y")]), "My site").unwrap();
-        assert!(!contents.has_conversation());
+        assert!(!contents.has_conversation() && !contents.has_project());
         let project = import(&store, &contents, &defaults(), true).unwrap();
-        assert_eq!((project.name.as_str(), project.provider), ("My site", ProviderId::Openai));
+        assert_eq!(
+            (
+                project.name.as_str(),
+                project.provider,
+                project.connection.as_deref(),
+                project.model.as_str()
+            ),
+            ("My site", ProviderId::OpenaiCompatible, Some("c1"), "gemma4")
+        );
         assert!(store.transcript(&project.id).is_empty());
     }
 

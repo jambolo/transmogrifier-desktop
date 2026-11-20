@@ -680,7 +680,10 @@ fn gemini_lists_only_text_models() {
 
 #[test]
 fn chat_completions_request_matches_the_wire_format() {
-    let mut request = request(ProviderId::Local, vec![json!({"role": "user", "content": "Earlier"})]);
+    let mut request = request(
+        ProviderId::OpenaiCompatible,
+        vec![json!({"role": "user", "content": "Earlier"})],
+    );
     request.model = "qwen3-coder".into();
     let body = chat_completions::body(&request);
     // Only what every server accepts is sent.
@@ -788,7 +791,10 @@ fn chat_completions_tool_results_come_before_text() {
 
 #[test]
 fn chat_completions_tolerates_servers_that_bend_the_format() {
-    let request = request(ProviderId::Local, vec![json!({"role": "user", "content": "Earlier"})]);
+    let request = request(
+        ProviderId::OpenaiCompatible,
+        vec![json!({"role": "user", "content": "Earlier"})],
+    );
     let mut mapper = chat_completions::TurnMapper::new(&request);
     let chunk = |delta: Value, finish: Value| json!({"choices": [{"index": 0, "delta": delta, "finish_reason": finish}]});
     // No IDs, every call at index 0 or none, whole arguments as an object, and "stop" for a tool turn.

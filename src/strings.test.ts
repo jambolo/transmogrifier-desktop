@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { PROVIDERS, usesEndpoint } from './api';
 import {
+  SERVER_PRESETS,
+  connectionLabel,
+  connectionModel,
   keyErrorText,
   noticeText,
   providerLabel,
@@ -33,7 +36,7 @@ describe('strings', () => {
   });
 
   it('explains a failed check of a server in terms of its address', () => {
-    expect(keyErrorText('LOCAL', { kind: 'NETWORK', network: 'CONNECTION_REFUSED', status: null, detail: null })).toBe(
+    expect(keyErrorText('OPENAI_COMPATIBLE', { kind: 'NETWORK', network: 'CONNECTION_REFUSED', status: null, detail: null })).toBe(
       "Couldn't connect to the server. Check that it is running and that the address is right.",
     );
     expect(keyErrorText('OPENAI_COMPATIBLE', { kind: 'REJECTED', network: null, status: 404, detail: 'Not Found' })).toBe(
@@ -42,13 +45,26 @@ describe('strings', () => {
   });
 
   it('names every provider and the services it covers', () => {
-    expect(PROVIDERS.map(providerLabel)).toEqual(['Claude', 'ChatGPT', 'Gemini', 'OpenAI-compatible', 'Local model']);
+    expect(PROVIDERS.map(providerLabel)).toEqual(['Claude', 'ChatGPT', 'Gemini', 'OpenAI-compatible']);
     for (const provider of PROVIDERS) {
       const services = providerServices(provider);
       expect(services.length).toBeGreaterThan(0);
       // A server's services each come with an address to fill in.
       expect(services.every((service) => (service.endpoint !== undefined) === usesEndpoint(provider))).toBe(true);
     }
+  });
+
+  it('offers hosted and local servers to add', () => {
+    expect(SERVER_PRESETS.hosted.map((preset) => preset.name)).toContain('OpenRouter');
+    expect(SERVER_PRESETS.local.every((preset) => preset.endpoint.startsWith('http://localhost:'))).toBe(true);
+  });
+
+  it('names a connection and its model', () => {
+    const claude = { id: 'anthropic', name: '', protocol: 'ANTHROPIC', model: '' } as const;
+    const server = { id: 'c1', name: 'Ollama', protocol: 'OPENAI_COMPATIBLE', model: 'gemma4' } as const;
+    expect([connectionLabel(claude), connectionModel(claude)]).toEqual(['Claude', 'claude-opus-5-5']);
+    expect([connectionLabel(server), connectionModel(server)]).toEqual(['Ollama', 'gemma4']);
+    expect(connectionModel({ ...server, model: '' })).toBe('');
   });
 
   it('formats notices, retries, and usage', () => {

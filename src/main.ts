@@ -1,6 +1,6 @@
 // The app shell: switches between the three views and routes backend events to them.
 
-import { PROVIDERS, api, providerReady } from './api';
+import { api, connectionReady } from './api';
 import { confirmDialog, errorMessage, toast } from './dom';
 import { text } from './strings';
 import { createProjectsView } from './views/projects';
@@ -78,7 +78,7 @@ async function start(): Promise<void> {
   if (requested !== null) return openRequested(requested);
   // Without an AI service nothing can be made, so the first launch starts in Settings.
   const saved = await api.getSettings();
-  if (PROVIDERS.some((provider) => providerReady(saved, provider))) showProjects();
+  if (saved.connections.some(connectionReady)) showProjects();
   else showSettings();
 }
 

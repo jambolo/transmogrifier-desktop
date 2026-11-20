@@ -1,7 +1,7 @@
 // Interface wording. Voice and vocabulary follow docs/branding/03-voice-and-messaging.md.
 
 import { usesEndpoint } from './api';
-import type { Effort, KeyTestFailure, NoticeKind, ProviderId, TranscriptEntry } from './api';
+import type { Connection, Effort, KeyTestFailure, NoticeKind, ProviderId, TranscriptEntry } from './api';
 
 export const text = {
   appName: 'Transmogrifier',
@@ -29,6 +29,16 @@ export const text = {
   noApps: 'Start with something small. A scorekeeper, a packing list, a lunch picker.',
   name: 'App name',
   nameHint: "Something you'll recognize later.",
+  service: 'AI service',
+  model: 'Model',
+  noServiceReady: 'Connect an AI service in Settings first.',
+  changeService: 'Change AI service',
+  changeServiceTitle: (name: string) => `Change the AI service for “${name}”?`,
+  changeServiceBody:
+    "The app and its files are kept. If the new service is a different kind, the conversation is reset and your AI service starts again from the app's files.",
+  serviceChanged: 'AI service changed.',
+  serviceMissing: 'AI service not set up',
+  chooseService: 'Choose AI service',
   moreOptions: (name: string) => `More options for ${name}`,
   exportSite: 'Export app files',
   backUp: 'Back up',
@@ -51,6 +61,8 @@ export const text = {
   importConversationTitle: (name: string) => `Import “${name}” with its conversation?`,
   importConversationBody:
     "With the conversation, your AI service remembers how the app was made. Without it, your AI service starts again from the app's files. If changes fail after importing with the conversation, import again without it.",
+  importServiceTitle: (name: string) => `Which AI service should change “${name}”?`,
+  importServiceBody: 'These app files come without a conversation. Choose the service and model for changes to the app.',
   importWithConversation: 'With conversation',
   importWithoutConversation: 'Without',
   projectSubtitle: (when: string, provider: string) => `Edited ${when} · ${provider}`,
@@ -85,11 +97,6 @@ export const text = {
   openLinkTitle: 'Open this link in your browser?',
   open: 'Open',
   projectMissing: 'This app no longer exists.',
-  examples: [
-    { label: 'Game night', prompt: 'A scorekeeper for two teams, with big plus and minus buttons.' },
-    { label: 'Weekend away', prompt: 'A packing checklist for a weekend away. Let me add and check off items.' },
-    { label: 'Pick lunch', prompt: "A lunch picker. I'll enter the choices, and it picks one at random." },
-  ],
 
   // Settings
   services: 'Connect an AI service',
@@ -99,19 +106,32 @@ export const text = {
   serviceNeedsModel: 'Needs a model',
   serviceNotSetUp: 'Not set up',
   worksWith: 'Works with',
-  presetHint: 'Choose one to fill in its address.',
-  usePreset: (name: string) => `Use the address for ${name}`,
+  servicePerApp: 'You choose the service and model for each app when you make it.',
+  addServer: 'Add a service or local model',
+  addServerHelp:
+    "Any hosted service or local model server that accepts OpenAI's chat completions format. Choose one to fill in its name and address, or enter your own. The model must support tool calling.",
+  hostedPresets: 'Hosted services',
+  localPresets: 'On your computer',
+  usePreset: (name: string) => `Use the name and address for ${name}`,
+  serverName: 'Name',
+  add: 'Add',
+  serverAddFailed: (detail: string) => `Couldn't add the service. ${detail}`,
+  serverHelp: 'Save an API key if the service needs one, then check the connection and choose a model that supports tool calling.',
+  renameServer: 'Rename',
+  removeServer: 'Remove',
+  removeServerTitle: (name: string) => `Remove “${name}”?`,
+  removeServerBody:
+    'Its address and key are forgotten. Apps made with it keep their files, and need another AI service before they can be changed.',
   apiKey: 'API key',
-  apiKeyOptional: 'API key (optional)',
   apiKeyHelp: (source: string) => `A connection key from ${source}. Paste it here to let Transmogrifier make and change apps.`,
   replaceKey: 'Replace key',
   clearKey: 'Clear key',
   keyMissing: 'No key saved',
+  keyMissingServer: "No key saved. A local server usually doesn't need one.",
   keySaved: (hint: string) => `Saved key ending in …${hint}`,
   address: 'Server address',
   addressHelp: 'Where requests are sent. It usually ends in /v1.',
   addressSaveFailed: (detail: string) => `Couldn't save the address. ${detail}`,
-  removeAddress: 'Remove address',
   test: 'Check connection',
   keyTesting: 'Checking connection…',
   keyTestPassed: (count: number) =>
@@ -123,8 +143,6 @@ export const text = {
   modelHelp: 'Check the connection to choose from the models you can use.',
   chooseModel: 'Choose a model',
   modelNeeded: "Check the connection to choose from the server's models, or type a model's name.",
-  defaultProvider: 'AI service for new apps',
-  defaultProviderHelp: 'Each app keeps the service and model it was made with.',
   advancedSettings: 'Advanced settings',
   hideAdvancedSettings: 'Hide advanced settings',
   advancedHelp: 'Choose how your AI service works. The defaults are ready to use.',
@@ -156,7 +174,6 @@ export const DEFAULT_MODELS: Record<ProviderId, string> = {
   OPENAI: 'gpt-6.1-sol',
   GEMINI: 'gemini-4-carbon',
   OPENAI_COMPATIBLE: '',
-  LOCAL: '',
 };
 
 /** A service a provider's adapter reaches, with its usual address when the user must enter one. */
@@ -164,6 +181,27 @@ export interface ProviderService {
   name: string;
   endpoint?: string;
 }
+
+/** Well-known servers a connection can be added for. */
+export const SERVER_PRESETS = {
+  hosted: [
+    { name: 'OpenRouter', endpoint: 'https://openrouter.ai/api/v1' },
+    { name: 'Groq', endpoint: 'https://api.groq.com/openai/v1' },
+    { name: 'Together AI', endpoint: 'https://api.together.xyz/v1' },
+    { name: 'Fireworks AI', endpoint: 'https://api.fireworks.ai/inference/v1' },
+    { name: 'Mistral', endpoint: 'https://api.mistral.ai/v1' },
+    { name: 'DeepSeek', endpoint: 'https://api.deepseek.com/v1' },
+    { name: 'xAI', endpoint: 'https://api.x.ai/v1' },
+    { name: 'Cerebras', endpoint: 'https://api.cerebras.ai/v1' },
+  ],
+  local: [
+    { name: 'Ollama', endpoint: 'http://localhost:11434/v1' },
+    { name: 'LM Studio', endpoint: 'http://localhost:1234/v1' },
+    { name: 'llama.cpp', endpoint: 'http://localhost:8080/v1' },
+    { name: 'vLLM', endpoint: 'http://localhost:8000/v1' },
+    { name: 'Jan', endpoint: 'http://localhost:1337/v1' },
+  ],
+} as const satisfies Record<string, readonly ProviderService[]>;
 
 interface ProviderInfo {
   label: string;
@@ -196,29 +234,8 @@ const PROVIDER_INFO: Record<ProviderId, ProviderInfo> = {
   OPENAI_COMPATIBLE: {
     label: 'OpenAI-compatible',
     keySource: 'the service',
-    help: "Any service that accepts OpenAI's chat completions format. Enter the service's address and its API key. The model must support tool calling.",
-    services: [
-      { name: 'OpenRouter', endpoint: 'https://openrouter.ai/api/v1' },
-      { name: 'Groq', endpoint: 'https://api.groq.com/openai/v1' },
-      { name: 'Together AI', endpoint: 'https://api.together.xyz/v1' },
-      { name: 'Fireworks AI', endpoint: 'https://api.fireworks.ai/inference/v1' },
-      { name: 'Mistral', endpoint: 'https://api.mistral.ai/v1' },
-      { name: 'DeepSeek', endpoint: 'https://api.deepseek.com/v1' },
-      { name: 'xAI', endpoint: 'https://api.x.ai/v1' },
-      { name: 'Cerebras', endpoint: 'https://api.cerebras.ai/v1' },
-    ],
-  },
-  LOCAL: {
-    label: 'Local model',
-    keySource: 'your server',
-    help: 'A model running on this computer or your network, through a server with an OpenAI-compatible address. Add an API key only if your server asks for one. The model must support tool calling.',
-    services: [
-      { name: 'Ollama', endpoint: 'http://localhost:11434/v1' },
-      { name: 'LM Studio', endpoint: 'http://localhost:1234/v1' },
-      { name: 'llama.cpp', endpoint: 'http://localhost:8080/v1' },
-      { name: 'vLLM', endpoint: 'http://localhost:8000/v1' },
-      { name: 'Jan', endpoint: 'http://localhost:1337/v1' },
-    ],
+    help: text.serverHelp,
+    services: [...SERVER_PRESETS.hosted, ...SERVER_PRESETS.local],
   },
 };
 
@@ -239,6 +256,16 @@ export function providerHelp(provider: ProviderId): string {
 /** The major services the provider's adapter covers. */
 export function providerServices(provider: ProviderId): readonly ProviderService[] {
   return PROVIDER_INFO[provider].services;
+}
+
+/** What the user calls a connection: a server's own name, or a built-in connection's provider. */
+export function connectionLabel(connection: Connection): string {
+  return connection.name || providerLabel(connection.protocol);
+}
+
+/** The model new apps use with a connection: the user's choice, or the provider's default. */
+export function connectionModel(connection: Connection): string {
+  return connection.model || DEFAULT_MODELS[connection.protocol];
 }
 
 export function effortLabel(effort: Effort): string {
@@ -298,7 +325,7 @@ export function noticeText(kind: NoticeKind, detail?: string): string {
     case 'FAILED':
       return `This request couldn't finish: ${detail ?? ''}`;
     case 'PROVIDER_UNAVAILABLE':
-      return "This app's AI service isn't available in this version, so the app can't be changed.";
+      return "This app's AI service isn't set up on this computer. Choose another to keep changing the app.";
     case 'IMPORTED_WITHOUT_CONVERSATION':
       return "Imported without its conversation. Your AI service starts again from the app's files.";
     case 'CONVERSATION_RESET':

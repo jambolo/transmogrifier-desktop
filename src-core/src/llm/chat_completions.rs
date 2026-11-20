@@ -1,27 +1,25 @@
 //! Any server that speaks the streaming Chat Completions format: hosted OpenAI-compatible services and local
-//! model servers. The address comes from the user's settings and the API key is optional.
+//! model servers. The address comes from the connection the user saved and the API key is optional.
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::http::{self, EventStream};
 use super::{
-    CompletedTurn, EndpointSource, KeySource, LlmError, LlmErrorKind, LlmProvider, ModelInfo, ProviderId, StopReason, ToolCall,
-    ToolDefinition, TurnEvent, TurnInput, TurnRequest, Usage,
+    CompletedTurn, KeySource, LlmError, LlmErrorKind, LlmProvider, ModelInfo, ProviderId, StopReason, ToolCall, ToolDefinition,
+    TurnEvent, TurnInput, TurnRequest, Usage,
 };
 
 pub struct ChatCompletionsProvider {
-    id: ProviderId,
-    endpoint: EndpointSource,
+    endpoint: Option<String>,
     api_key: KeySource,
     client: reqwest::Client,
 }
 
 impl ChatCompletionsProvider {
     /// `endpoint` is the base address, which `/models` and `/chat/completions` are appended to.
-    pub fn new(id: ProviderId, endpoint: EndpointSource, api_key: KeySource) -> Self {
+    pub fn new(endpoint: Option<String>, api_key: KeySource) -> Self {
         Self {
-            id,
             endpoint,
             api_key,
             client: http::client(),
@@ -29,7 +27,10 @@ impl ChatCompletionsProvider {
     }
 
     fn url(&self, path: &str) -> Result<String, LlmError> {
-        let base = (self.endpoint)().ok_or_else(|| LlmError::new(LlmErrorKind::Rejected, "No server address saved"))?;
+        let base = self
+            .endpoint
+            .as_deref()
+            .ok_or_else(|| LlmError::new(LlmErrorKind::Rejected, "No server address saved"))?;
         Ok(format!("{}/{path}", base.trim_end_matches('/')))
     }
 
@@ -45,7 +46,7 @@ impl ChatCompletionsProvider {
 #[async_trait]
 impl LlmProvider for ChatCompletionsProvider {
     fn id(&self) -> ProviderId {
-        self.id
+        ProviderId::OpenaiCompatible
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, LlmError> {

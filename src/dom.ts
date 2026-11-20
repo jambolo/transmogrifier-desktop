@@ -146,7 +146,7 @@ export function showDialog<T>(title: string, body: Child[], actions: Array<Dialo
     document.body.append(dialog);
     if (modal) dialog.showModal();
     else dialog.setAttribute('open', '');
-    const field = dialog.querySelector<HTMLElement>('input, textarea');
+    const field = dialog.querySelector<HTMLElement>('input, select, textarea');
     (field ?? buttons[0])?.focus();
   });
 }

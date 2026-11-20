@@ -16,10 +16,10 @@ Apps are written by the AI service you connect in Settings:
 | **Claude** | Anthropic API |
 | **ChatGPT** | OpenAI API |
 | **Gemini** | Google AI Studio (Gemini API) |
-| **OpenAI-compatible** | OpenRouter, Groq, Together AI, Fireworks AI, Mistral, DeepSeek, xAI, Cerebras, and any other service that accepts OpenAI's chat completions format |
-| **Local model** | Ollama, LM Studio, llama.cpp, vLLM, Jan, and any other server with an OpenAI-compatible address |
+| **Other hosted services** | OpenRouter, Groq, Together AI, Fireworks AI, Mistral, DeepSeek, xAI, Cerebras, and any other service that accepts OpenAI's chat completions format |
+| **Local models** | Ollama, LM Studio, llama.cpp, vLLM, Jan, and any other server with an OpenAI-compatible address |
 
-A hosted service needs your own API key, and requests are billed to that account. There is no sign-in with a Claude, ChatGPT, or Gemini subscription. A local model needs no key and costs nothing to use. With an OpenAI-compatible service or a local model, choose a model that supports tool calling.
+You can add as many hosted services and local models as you like, and choose among them for each app. A hosted service needs your own API key, and requests are billed to that account. There is no sign-in with a Claude, ChatGPT, or Gemini subscription. A local model needs no key and costs nothing to use. With an OpenAI-compatible service or a local model, choose a model that supports tool calling.
 
 ## Requirements
 
@@ -33,9 +33,8 @@ A hosted service needs your own API key, and requests are billed to that account
 
 1. On first launch, the app opens **Settings**, with a card for each AI service. Open the card for yours.
    - **Claude**, **ChatGPT**, or **Gemini**: paste your API key, click **Save**, then **Check connection**. A passing check shows how many models the key can use. The **Model for new apps** has a default; after a check you can choose another.
-   - **OpenAI-compatible** or **Local model**: choose your service under **Works with** to fill in its usual **Server address**, or type the address, and click **Save**. Save an API key if the service needs one; a local server usually doesn't. Click **Check connection**, then choose the **Model for new apps** from the server's models.
-2. If more than one service is ready, choose one under **AI service for new apps**. Each app keeps the service and model it was made with.
-3. The defaults are ready to use. Open **Advanced settings** to adjust:
+   - **Another hosted service or a local model**: open **Add a service or local model**, choose yours to fill in its **Name** and usual **Server address**, or type them, and click **Add**. The service gets a card of its own. Save an API key there if the service needs one; a local server usually doesn't. Click **Check connection**, then choose the **Model for new apps** from the server's models. Add another the same way; **Rename** and **Remove** are on each card.
+2. The defaults are ready to use. Open **Advanced settings** to adjust:
    - **Thinking effort**: how much the model reasons before answering. More thinking can take longer and cost more. OpenAI-compatible services and local models use their own setting.
    - **Steps per request**: how many steps the model may take for one request before it pauses.
    - **Reply limit (tokens)**: the length limit for each model reply. These limits are not spending limits. OpenAI-compatible services and local models set their own reply limit.
@@ -43,8 +42,8 @@ A hosted service needs your own API key, and requests are billed to that account
 
 ### Create an app
 
-1. On the **Your apps** screen, click **New app** and give it a name.
-2. Describe what you want, for example "a tip calculator with a slider", or click an example to fill the request box. Click **Make app** (or press Enter) when ready. Shift+Enter adds a line.
+1. On the **Your apps** screen, click **New app** and give it a name. If more than one AI service is ready, choose the one that will make the app; the dialog starts with the service your last new app used. The **Model** is the service's model for new apps, and you can enter another. Each app keeps its service and model.
+2. Describe what you want, for example "a tip calculator with a slider". Click **Make app** (or press Enter) when ready. Shift+Enter adds a line.
 3. The chat shows the model's progress as it writes the files, along with the token usage for each step. The **Files** tab beside it lists the generated files, and clicking one opens a read-only view of its code.
 4. Send follow-up requests, such as "make the button blue", to change the app.
 
@@ -67,11 +66,12 @@ Click an app on the **Your apps** screen to open its chat. If the app has been m
 - **Rename**: the model uses your app's name, and picks up a new name on your next request.
 - **Export app files**: saves a zip of the app alone, ready to host anywhere.
 - **Back up**: saves a zip of the app with its conversation.
+- **Change AI service**: moves the app to another service or model. The app and its files are kept. The conversation continues, unless the new service is a different kind (Claude, ChatGPT, Gemini, or an OpenAI-compatible server), which resets it.
 - **Reset conversation**: forgets the conversation and keeps the app and its files. Use it when requests outgrow your AI service's token limits (Groq's free tier, say) or changes keep going wrong. The AI service starts again from the app's files.
 - **Add desktop shortcut**: a shortcut that opens Transmogrifier straight to the app, or to its chat if nothing has been made yet.
 - **Delete app**.
 
-**Import app** opens either kind of zip as a new app. A backup can be imported with or without its conversation. Each app keeps the service and model it was created with.
+**Import app** opens either kind of zip as a new app. A backup can be imported with or without its conversation, and keeps the service and model it was made with. If that service was a server that isn't set up on this computer, the app asks you to **Choose AI service** before it can be changed. A zip of app files alone doesn't say what made it: if more than one AI service is ready, you choose the service and model, as for a new app.
 
 ## Privacy and safety
 

@@ -1,20 +1,22 @@
-// Settings: the AI services, the service for new apps, and the advanced limits.
+// Settings: the connections to AI services, and the advanced limits.
 
-import { EFFORTS, PROVIDERS, providerReady, usesEndpoint } from '../api';
-import type { Api, KeyTest, ModelInfo, ProviderId, Settings } from '../api';
-import { button, errorMessage, h, icon, replace, toast } from '../dom';
+import { EFFORTS, connectionReady, usesEndpoint } from '../api';
+import type { Api, Connection, KeyTest, ModelInfo, Settings } from '../api';
+import { button, confirmDialog, errorMessage, h, icon, promptDialog, replace, toast } from '../dom';
 import {
-  DEFAULT_MODELS,
   MAX_APP_INSTRUCTIONS_LENGTH,
   OUTPUT_TOKENS_RANGE,
+  SERVER_PRESETS,
   TOOL_ITERATIONS_RANGE,
+  connectionLabel,
+  connectionModel,
   effortLabel,
   keyErrorText,
   providerHelp,
-  providerLabel,
   providerServices,
   text,
 } from '../strings';
+import type { ProviderService } from '../strings';
 
 export interface SettingsHandlers {
   onBack: () => void;
@@ -22,18 +24,24 @@ export interface SettingsHandlers {
 
 type KeyTestState = 'running' | KeyTest;
 
+/** What marks the card for adding a server, where a connection's card has its ID. */
+const ADD_CARD = 'add';
+
 export function createSettingsView(api: Api, handlers: SettingsHandlers) {
   let settings: Settings | null = null;
   let advanced = false;
-  /** Providers whose card is open: at first, the ones the user has set up. */
-  let expanded: Set<ProviderId> | null = null;
-  const keyTests: Partial<Record<ProviderId, KeyTestState>> = {};
-  /** Models returned by the last successful connection check, per provider. */
-  const models: Partial<Record<ProviderId, ModelInfo[]>> = {};
-  /** Providers whose key field is open for replacing a saved key. */
-  const replacing = new Set<ProviderId>();
-  /** Server addresses typed or picked but not yet saved. */
-  const addressDrafts: Partial<Record<ProviderId, string>> = {};
+  /** Connections whose card is open, by ID: at first, the ones the user has set up. */
+  let expanded: Set<string> | null = null;
+  const keyTests: Record<string, KeyTestState> = {};
+  /** Models returned by the last successful connection check, per connection. */
+  const models: Record<string, ModelInfo[]> = {};
+  /** Connections whose key field is open for replacing a saved key. */
+  const replacing = new Set<string>();
+  /** Server addresses typed but not yet saved. */
+  const addressDrafts: Record<string, string> = {};
+  /** The server being added. */
+  let adding = false;
+  let newServer = { name: '', endpoint: '' };
 
   const body = h('div', { className: 'settings-body' });
   const root = h(
@@ -55,7 +63,7 @@ export function createSettingsView(api: Api, handlers: SettingsHandlers) {
   async function load(): Promise<void> {
     const loaded = await api.getSettings();
     settings = loaded;
-    expanded ??= new Set(PROVIDERS.filter((provider) => hasKey(loaded, provider) || hasAddress(loaded, provider)));
+    expanded ??= new Set(loaded.connections.filter(isSetUp).map((connection) => connection.id));
     render();
   }
 
@@ -73,23 +81,19 @@ export function createSettingsView(api: Api, handlers: SettingsHandlers) {
   }
 
   /** Forgets what the last connection check found, after the key or address changed. */
-  function forgetCheck(provider: ProviderId): void {
-    delete keyTests[provider];
-    delete models[provider];
+  function forgetCheck(id: string): void {
+    delete keyTests[id];
+    delete models[id];
   }
 
-  function hasKey(current: Settings, provider: ProviderId): boolean {
-    return current.keyHints[provider] !== undefined;
-  }
-
-  function hasAddress(current: Settings, provider: ProviderId): boolean {
-    return current.endpoints[provider] !== undefined;
+  /** Whether the user has given the connection what reaches its service: a key, or an address. */
+  function isSetUp(connection: Connection): boolean {
+    return connection.keyHint !== undefined || connection.endpoint !== undefined;
   }
 
   function render(): void {
     if (!settings) return;
     const current = settings;
-    const ready = PROVIDERS.filter((provider) => providerReady(current, provider));
     replace(
       body,
       h(
@@ -97,9 +101,10 @@ export function createSettingsView(api: Api, handlers: SettingsHandlers) {
         { className: 'settings-section' },
         h('h2', {}, text.services),
         h('p', { className: 'muted' }, text.setupDisclosure),
-        ...PROVIDERS.map((provider) => providerCard(current, provider)),
+        ...current.connections.map(connectionCard),
+        addCard(),
+        h('p', { className: 'muted' }, text.servicePerApp),
       ),
-      ready.length > 1 ? providerChoice(current, ready) : null,
       h(
         'section',
         { className: 'settings-section' },
@@ -116,93 +121,136 @@ export function createSettingsView(api: Api, handlers: SettingsHandlers) {
     );
   }
 
-  /** One provider: a heading that opens and closes it, and its setup when open. */
-  function providerCard(current: Settings, provider: ProviderId): HTMLElement {
-    const open = expanded?.has(provider) ?? false;
-    const ready = providerReady(current, provider);
-    const status = ready ? text.serviceReady : hasAddress(current, provider) ? text.serviceNeedsModel : text.serviceNotSetUp;
+  /** A card's heading, which opens and closes it. */
+  function cardToggle(id: string, label: string, open: boolean, status: string, ready: boolean, onToggle: () => void): HTMLElement {
     const toggle = h(
       'button',
-      { type: 'button', className: 'provider-toggle', attrs: { 'aria-expanded': String(open), 'data-provider': provider } },
-      h('span', { className: 'provider-name' }, providerLabel(provider)),
+      { type: 'button', className: 'provider-toggle', attrs: { 'aria-expanded': String(open), 'data-connection': id } },
+      h('span', { className: 'provider-name' }, label),
       h('span', { className: ready ? 'provider-status ready' : 'provider-status' }, status),
       icon('chevronDown'),
     );
     toggle.addEventListener('click', () => {
-      if (open) expanded?.delete(provider);
-      else expanded?.add(provider);
+      onToggle();
       render();
-      body.querySelector<HTMLElement>(`[data-provider="${provider}"]`)?.focus();
+      body.querySelector<HTMLElement>(`[data-connection="${id}"]`)?.focus();
     });
-    const services = providerServices(provider);
-    const names = services.map((service) => service.name).join(', ');
-    // An open card for a server lists its services as buttons instead.
-    const pickable = open && usesEndpoint(provider);
+    return h('h3', {}, toggle);
+  }
+
+  /** One connection: a heading that opens and closes it, and its setup when open. */
+  function connectionCard(connection: Connection): HTMLElement {
+    const { id } = connection;
+    const open = expanded?.has(id) ?? false;
+    const ready = connectionReady(connection);
+    const status = ready ? text.serviceReady : connection.endpoint !== undefined ? text.serviceNeedsModel : text.serviceNotSetUp;
+    const server = usesEndpoint(connection.protocol);
+    const names = providerServices(connection.protocol).map((service) => service.name);
     return h(
       'article',
       { className: open ? 'card provider open' : 'card provider' },
-      h('h3', {}, toggle),
-      pickable ? null : h('p', { className: 'help' }, `${text.worksWith} ${names}`),
-      ...(open ? providerSetup(current, provider) : []),
+      cardToggle(id, connectionLabel(connection), open, status, ready, () => {
+        if (open) expanded?.delete(id);
+        else expanded?.add(id);
+      }),
+      // A server is known by its address; an open one shows it in a field instead.
+      server
+        ? open
+          ? null
+          : h('p', { className: 'help' }, connection.endpoint ?? '')
+        : h('p', { className: 'help' }, `${text.worksWith} ${names.join(', ')}`),
+      ...(open ? connectionSetup(connection) : []),
     );
   }
 
-  function providerSetup(current: Settings, provider: ProviderId): Array<HTMLElement | null> {
-    const server = usesEndpoint(provider);
-    const hint = current.keyHints[provider];
-    const editing = hint === undefined || replacing.has(provider);
-    const connected = server ? hasAddress(current, provider) : hint !== undefined;
+  function connectionSetup(connection: Connection): Array<HTMLElement | null> {
+    const { id, keyHint } = connection;
+    const server = usesEndpoint(connection.protocol);
+    const editing = keyHint === undefined || replacing.has(id);
     const actions = [
-      connected
-        ? button({
-            label: text.test,
-            icon: 'check',
-            disabled: keyTests[provider] === 'running',
-            onClick: () => void testKey(provider),
-          })
+      server || keyHint !== undefined
+        ? button({ label: text.test, icon: 'check', disabled: keyTests[id] === 'running', onClick: () => void testKey(id) })
         : null,
-      hint !== undefined && !editing
+      keyHint !== undefined && !editing
         ? button({
             label: text.replaceKey,
             icon: 'edit',
             onClick: () => {
-              replacing.add(provider);
+              replacing.add(id);
               render();
             },
           })
         : null,
-      hint !== undefined
-        ? button({ label: text.clearKey, icon: 'delete', kind: 'quiet', onClick: () => void saveKey(provider, null) })
+      keyHint !== undefined
+        ? button({ label: text.clearKey, icon: 'delete', kind: 'quiet', onClick: () => void saveKey(id, null) })
         : null,
-      server && hasAddress(current, provider)
-        ? button({ label: text.removeAddress, icon: 'delete', kind: 'quiet', onClick: () => void saveAddress(provider, null) })
-        : null,
+      server ? button({ label: text.renameServer, icon: 'edit', kind: 'quiet', onClick: () => void rename(connection) }) : null,
+      server ? button({ label: text.removeServer, icon: 'delete', kind: 'quiet', onClick: () => void remove(connection) }) : null,
     ].filter((action) => action !== null);
-    // A local server rarely needs a key, so only a saved one is reported.
     const keyStatus =
-      hint !== undefined
-        ? h('p', { className: 'key-status' }, text.keySaved(hint))
-        : provider === 'LOCAL'
-          ? null
-          : h('p', { className: 'muted' }, text.keyMissing);
+      keyHint !== undefined
+        ? h('p', { className: 'key-status' }, text.keySaved(keyHint))
+        : h('p', { className: 'muted' }, server ? text.keyMissingServer : text.keyMissing);
     return [
-      h('p', { className: 'help' }, providerHelp(provider)),
-      ...(server ? [presets(provider), addressForm(current, provider)] : []),
+      h('p', { className: 'help' }, providerHelp(connection.protocol)),
+      server ? addressForm(connection) : null,
       keyStatus,
-      editing ? keyForm(provider) : null,
+      editing ? keyForm(connection) : null,
       actions.length > 0 ? h('div', { className: 'actions start' }, ...actions) : null,
-      keyTestStatus(provider),
-      connected ? modelField(current, provider) : null,
+      keyTestStatus(connection),
+      server || keyHint !== undefined ? modelField(connection) : null,
     ];
   }
 
-  /** The services a server adapter covers; choosing one fills in its usual address. */
-  function presets(provider: ProviderId): HTMLElement {
-    const chips = providerServices(provider).map((service) => {
+  /** The card that adds a server: well-known ones to pick from, and its name and address. */
+  function addCard(): HTMLElement {
+    const name = h('input', { type: 'text', autocomplete: 'off', maxLength: 60, value: newServer.name });
+    name.addEventListener('input', () => (newServer.name = name.value));
+    const address = h('input', {
+      type: 'text',
+      inputMode: 'url',
+      autocomplete: 'off',
+      spellcheck: false,
+      value: newServer.endpoint,
+      placeholder: SERVER_PRESETS.local[0].endpoint,
+    });
+    address.addEventListener('input', () => (newServer.endpoint = address.value));
+    const add = () => {
+      if (name.value.trim() !== '' && address.value.trim() !== '') void addServer(name.value, address.value);
+    };
+    const form = h(
+      'form',
+      { className: 'key-form' },
+      labeled(text.serverName, name),
+      labeled(text.address, address, text.addressHelp),
+      button({ label: text.add, icon: 'plus', kind: 'primary', onClick: add }),
+    );
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      add();
+    });
+    return h(
+      'article',
+      { className: adding ? 'card provider open' : 'card provider' },
+      cardToggle(ADD_CARD, text.addServer, adding, '', false, () => (adding = !adding)),
+      ...(adding
+        ? [
+            h('p', { className: 'help' }, text.addServerHelp),
+            presets(text.hostedPresets, SERVER_PRESETS.hosted),
+            presets(text.localPresets, SERVER_PRESETS.local),
+            form,
+          ]
+        : []),
+    );
+  }
+
+  /** Well-known servers; choosing one fills in its name and usual address. */
+  function presets(label: string, services: readonly ProviderService[]): HTMLElement {
+    const chips = services.map((service) => {
       const chip = h('button', { type: 'button', className: 'chip' }, service.name);
       chip.setAttribute('aria-label', text.usePreset(service.name));
       chip.addEventListener('click', () => {
-        addressDrafts[provider] = service.endpoint ?? '';
+        newServer = { name: service.name, endpoint: service.endpoint ?? '' };
         render();
       });
       return chip;
@@ -210,47 +258,82 @@ export function createSettingsView(api: Api, handlers: SettingsHandlers) {
     return h(
       'div',
       { className: 'presets' },
-      h('span', { className: 'field-label' }, text.worksWith),
+      h('span', { className: 'field-label' }, label),
       h('div', { className: 'chips' }, ...chips),
-      h('span', { className: 'help' }, text.presetHint),
     );
   }
 
-  async function saveAddress(provider: ProviderId, address: string | null): Promise<void> {
+  async function addServer(name: string, endpoint: string): Promise<void> {
     try {
-      settings = await api.setEndpoint(provider, address);
-      delete addressDrafts[provider];
-      forgetCheck(provider);
+      settings = await api.addConnection(name.trim(), endpoint.trim());
+      const added = settings.connections[settings.connections.length - 1];
+      expanded?.add(added.id);
+      adding = false;
+      newServer = { name: '', endpoint: '' };
     } catch (error) {
-      toast(address === null ? errorMessage(error) : text.addressSaveFailed(errorMessage(error)), true);
+      toast(text.serverAddFailed(errorMessage(error)), true);
     }
     render();
   }
 
-  function addressForm(current: Settings, provider: ProviderId): HTMLElement {
+  async function rename(connection: Connection): Promise<void> {
+    const name = await promptDialog(text.renameServer, { label: text.serverName, value: connection.name, confirm: text.save });
+    if (name === null || name === connection.name) return;
+    try {
+      settings = await api.editConnection(connection.id, { name });
+    } catch (error) {
+      toast(errorMessage(error), true);
+    }
+    render();
+  }
+
+  async function remove(connection: Connection): Promise<void> {
+    const confirmed = await confirmDialog(text.removeServerTitle(connection.name), text.removeServerBody, {
+      label: text.removeServer,
+      kind: 'danger',
+    });
+    if (!confirmed) return;
+    try {
+      settings = await api.removeConnection(connection.id);
+      expanded?.delete(connection.id);
+      replacing.delete(connection.id);
+      delete addressDrafts[connection.id];
+      forgetCheck(connection.id);
+    } catch (error) {
+      toast(errorMessage(error), true);
+    }
+    render();
+  }
+
+  async function saveAddress(id: string, endpoint: string): Promise<void> {
+    try {
+      settings = await api.editConnection(id, { endpoint });
+      delete addressDrafts[id];
+      forgetCheck(id);
+    } catch (error) {
+      toast(text.addressSaveFailed(errorMessage(error)), true);
+    }
+    render();
+  }
+
+  function addressForm(connection: Connection): HTMLElement {
+    const { id } = connection;
     const input = h('input', {
       type: 'text',
       inputMode: 'url',
       autocomplete: 'off',
       spellcheck: false,
-      value: addressDrafts[provider] ?? current.endpoints[provider] ?? '',
-      placeholder: providerServices(provider)[0]?.endpoint ?? '',
+      value: addressDrafts[id] ?? connection.endpoint ?? '',
     });
-    input.addEventListener('input', () => (addressDrafts[provider] = input.value));
+    input.addEventListener('input', () => (addressDrafts[id] = input.value));
     const save = () => {
       const address = input.value.trim();
-      if (address !== '') void saveAddress(provider, address);
+      if (address !== '' && address !== connection.endpoint) void saveAddress(id, address);
     };
     const form = h(
       'form',
       { className: 'key-form' },
-      h(
-        'label',
-        { className: 'field grow' },
-        h('span', { className: 'field-label' }, text.address),
-        input,
-        h('span', { className: 'help' }, text.addressHelp),
-      ),
+      labeled(text.address, input, text.addressHelp),
       button({ label: text.save, kind: 'primary', onClick: save }),
     );
     form.addEventListener('submit', (event) => {
@@ -261,21 +344,20 @@ export function createSettingsView(api: Api, handlers: SettingsHandlers) {
   }
 
   /** Saves the key, or removes the saved one when it is null. */
-  async function saveKey(provider: ProviderId, key: string | null): Promise<void> {
+  async function saveKey(id: string, key: string | null): Promise<void> {
     try {
-      settings = await api.setApiKey(provider, key);
-      replacing.delete(provider);
-      forgetCheck(provider);
+      settings = await api.setApiKey(id, key);
+      replacing.delete(id);
+      forgetCheck(id);
     } catch (error) {
       toast(key === null ? errorMessage(error) : text.keySaveFailed(errorMessage(error)), true);
     }
     render();
   }
 
-  function keyForm(provider: ProviderId): HTMLElement {
-    const label = provider === 'LOCAL' ? text.apiKeyOptional : text.apiKey;
+  function keyForm(connection: Connection): HTMLElement {
     const input = h('input', { type: 'password', autocomplete: 'off', spellcheck: false });
-    input.setAttribute('aria-label', `${providerLabel(provider)} ${text.apiKey}`);
+    input.setAttribute('aria-label', `${connectionLabel(connection)} ${text.apiKey}`);
     const reveal = button({
       label: text.show,
       kind: 'quiet',
@@ -287,14 +369,14 @@ export function createSettingsView(api: Api, handlers: SettingsHandlers) {
     });
     const save = () => {
       const key = input.value.trim();
-      if (key !== '') void saveKey(provider, key);
+      if (key !== '') void saveKey(connection.id, key);
     };
     // A server's card already has a main action: saving its address.
-    const kind = usesEndpoint(provider) ? 'secondary' : 'primary';
+    const kind = usesEndpoint(connection.protocol) ? 'secondary' : 'primary';
     const form = h(
       'form',
       { className: 'key-form' },
-      h('label', { className: 'field grow' }, h('span', { className: 'field-label' }, label), input),
+      h('label', { className: 'field grow' }, h('span', { className: 'field-label' }, text.apiKey), input),
       reveal,
       button({ label: text.save, kind, onClick: save }),
     );
@@ -305,26 +387,26 @@ export function createSettingsView(api: Api, handlers: SettingsHandlers) {
     return form;
   }
 
-  function keyTestStatus(provider: ProviderId): HTMLElement | null {
-    const test = keyTests[provider];
+  function keyTestStatus(connection: Connection): HTMLElement | null {
+    const test = keyTests[connection.id];
     if (test === undefined) return null;
     if (test === 'running') return h('p', { className: 'muted', attrs: { role: 'status' } }, text.keyTesting);
     if (test.result === 'passed') {
-      const passed = usesEndpoint(provider) ? text.serverTestPassed : text.keyTestPassed;
+      const passed = usesEndpoint(connection.protocol) ? text.serverTestPassed : text.keyTestPassed;
       return h('p', { className: 'success', attrs: { role: 'status' } }, passed(test.models.length));
     }
-    return h('p', { className: 'error', attrs: { role: 'alert' } }, keyErrorText(provider, test.error));
+    return h('p', { className: 'error', attrs: { role: 'alert' } }, keyErrorText(connection.protocol, test.error));
   }
 
-  async function testKey(provider: ProviderId): Promise<void> {
-    keyTests[provider] = 'running';
+  async function testKey(id: string): Promise<void> {
+    keyTests[id] = 'running';
     render();
     try {
-      const result = await api.testApiKey(provider);
-      if (result.result === 'passed') models[provider] = result.models;
-      keyTests[provider] = result;
+      const result = await api.testApiKey(id);
+      if (result.result === 'passed') models[id] = result.models;
+      keyTests[id] = result;
     } catch (error) {
-      delete keyTests[provider];
+      delete keyTests[id];
       toast(errorMessage(error), true);
     }
     // A check that found the key missing also cleared its hint.
@@ -332,14 +414,19 @@ export function createSettingsView(api: Api, handlers: SettingsHandlers) {
     render();
   }
 
-  /** The model new apps use with this provider: a list after a connection check, or a name to type. */
-  function modelField(current: Settings, provider: ProviderId): HTMLElement {
-    const model = current.defaultModels[provider] ?? DEFAULT_MODELS[provider];
-    const setModel = (value: string) =>
-      void update((next) => {
-        if (value.trim() !== '') next.defaultModels[provider] = value.trim();
-      });
-    const known = models[provider];
+  /** The model new apps start with on this connection: a list after a connection check, or a name to type. */
+  function modelField(connection: Connection): HTMLElement {
+    const model = connectionModel(connection);
+    const setModel = async (value: string) => {
+      if (value.trim() === '') return;
+      try {
+        settings = await api.editConnection(connection.id, { model: value.trim() });
+      } catch (error) {
+        toast(errorMessage(error), true);
+      }
+      render();
+    };
+    const known = models[connection.id];
     if (known && known.length > 0) {
       // The saved choice stays selectable even if the key can no longer see it.
       const first = model === '' ? { id: '', displayName: text.chooseModel } : { id: model, displayName: model };
@@ -349,27 +436,12 @@ export function createSettingsView(api: Api, handlers: SettingsHandlers) {
         {},
         ...listed.map((info) => h('option', { value: info.id, selected: info.id === model }, info.displayName)),
       );
-      select.addEventListener('change', () => setModel(select.value));
+      select.addEventListener('change', () => void setModel(select.value));
       return field(text.defaultModel, select);
     }
     const input = h('input', { type: 'text', value: model, spellcheck: false });
-    input.addEventListener('change', () => setModel(input.value));
-    return field(text.defaultModel, input, usesEndpoint(provider) ? text.modelNeeded : text.modelHelp);
-  }
-
-  function providerChoice(current: Settings, available: ProviderId[]): HTMLElement {
-    const options = available.map((provider) => {
-      const radio = h('input', { type: 'radio', name: 'default-provider', checked: current.defaultProvider === provider });
-      radio.addEventListener('change', () => void update((next) => (next.defaultProvider = provider)));
-      return h('label', { className: 'choice' }, radio, h('span', {}, providerLabel(provider)));
-    });
-    return h(
-      'section',
-      { className: 'settings-section' },
-      h('h2', {}, text.defaultProvider),
-      h('p', { className: 'muted' }, text.defaultProviderHelp),
-      h('div', { className: 'choices' }, ...options),
-    );
+    input.addEventListener('change', () => void setModel(input.value));
+    return field(text.defaultModel, input, usesEndpoint(connection.protocol) ? text.modelNeeded : text.modelHelp);
   }
 
   function advancedSettings(current: Settings): HTMLElement {
@@ -412,6 +484,13 @@ export function createSettingsView(api: Api, handlers: SettingsHandlers) {
       h('label', { className: 'choice' }, network, h('span', {}, text.appNetworkLabel)),
       h('p', { className: 'help' }, text.appNetworkHelp),
     );
+  }
+
+  /** A field that shares a row with others. */
+  function labeled(label: string, control: HTMLElement, help?: string): HTMLElement {
+    const element = field(label, control, help);
+    element.classList.add('grow');
+    return element;
   }
 
   function field(label: string, control: HTMLElement, help?: string): HTMLElement {

@@ -9,36 +9,55 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
-export type ProviderId = 'ANTHROPIC' | 'OPENAI' | 'GEMINI' | 'OPENAI_COMPATIBLE' | 'LOCAL';
-export const PROVIDERS: readonly ProviderId[] = ['ANTHROPIC', 'OPENAI', 'GEMINI', 'OPENAI_COMPATIBLE', 'LOCAL'];
+/** A wire format. Which service speaks it, and where, is a `Connection`. */
+export type ProviderId = 'ANTHROPIC' | 'OPENAI' | 'GEMINI' | 'OPENAI_COMPATIBLE';
+export const PROVIDERS: readonly ProviderId[] = ['ANTHROPIC', 'OPENAI', 'GEMINI', 'OPENAI_COMPATIBLE'];
 
 /** Whether the provider is reached at an address the user saves; mirrors `ProviderId::uses_endpoint`. */
 export function usesEndpoint(provider: ProviderId): boolean {
-  return provider === 'OPENAI_COMPATIBLE' || provider === 'LOCAL';
+  return provider === 'OPENAI_COMPATIBLE';
 }
 
 export type Effort = 'LOW' | 'MEDIUM' | 'HIGH' | 'XHIGH' | 'MAX';
 export const EFFORTS: readonly Effort[] = ['LOW', 'MEDIUM', 'HIGH', 'XHIGH', 'MAX'];
 
+/** One AI service the user can make apps with: a built-in one, or a server the user added. */
+export interface Connection {
+  id: string;
+  /** The user's name for a server; empty for a built-in connection. */
+  name: string;
+  protocol: ProviderId;
+  /** A server's address. */
+  endpoint?: string;
+  /** The user's choice of model for new apps; empty to use the provider's default. */
+  model: string;
+  /** Last four characters of the saved key. The key itself never reaches the front end. */
+  keyHint?: string;
+}
+
+/** Changes to a connection; a missing field is left as it is. */
+export interface ConnectionEdit {
+  name?: string;
+  endpoint?: string;
+  model?: string;
+}
+
 export interface Settings {
-  defaultProvider: ProviderId;
-  /** The user's choices; providers without one use the built-in default. */
-  defaultModels: Partial<Record<ProviderId, string>>;
+  /** The built-in connections, then the user's servers. */
+  connections: Connection[];
+  /** The connection the last new app used. */
+  lastConnection: string;
   effort: Effort;
   maxToolIterations: number;
   maxOutputTokens: number;
   appInstructions: string;
   allowAppNetwork: boolean;
-  /** Last four characters of each saved key. The keys themselves never reach the front end. */
-  keyHints: Partial<Record<ProviderId, string>>;
-  /** The server address of each provider that is reached at one. */
-  endpoints: Partial<Record<ProviderId, string>>;
 }
 
-/** Whether new apps can use the provider; mirrors `Settings::is_ready`. */
-export function providerReady(settings: Settings, provider: ProviderId): boolean {
-  if (!usesEndpoint(provider)) return settings.keyHints[provider] !== undefined;
-  return settings.endpoints[provider] !== undefined && (settings.defaultModels[provider] ?? '') !== '';
+/** Whether new apps can use the connection; mirrors `Connection::is_ready`. */
+export function connectionReady(connection: Connection): boolean {
+  if (!usesEndpoint(connection.protocol)) return connection.keyHint !== undefined;
+  return connection.endpoint !== undefined && connection.model !== '';
 }
 
 export interface ModelInfo {
@@ -61,9 +80,18 @@ export interface Project {
   id: string;
   name: string;
   provider: ProviderId;
+  /** The saved connection the app uses, when its provider can have several. */
+  connection?: string;
   model: string;
   createdAtMillis: number;
   updatedAtMillis: number;
+}
+
+/** The connection an app uses, or undefined if it isn't set up here; mirrors `Settings::connection_for`. */
+export function connectionFor(settings: Settings, project: Project): Connection | undefined {
+  const candidates = settings.connections.filter((connection) => connection.protocol === project.provider);
+  if (project.connection !== undefined) return candidates.find((connection) => connection.id === project.connection);
+  return candidates.length === 1 ? candidates[0] : undefined;
 }
 
 export type NoticeKind =
@@ -136,7 +164,15 @@ export interface ConsoleView {
 export interface ArchiveInfo {
   path: string;
   name: string;
+  /** Whether the zip is a backup, which says what service made the app; app files alone don't. */
+  hasProject: boolean;
   hasConversation: boolean;
+}
+
+/** The connection and model chosen for an app. */
+export interface ServiceChoice {
+  connection: string;
+  model: string;
 }
 
 /** Stops listening. */
@@ -150,28 +186,41 @@ export const api = {
   getSettings(): Promise<Settings> {
     return invoke<Settings>('get_settings');
   },
-  /** Saves everything except API keys, their hints, and server addresses. */
+  /** Saves everything except the connections. */
   updateSettings(settings: Settings): Promise<Settings> {
     return invoke<Settings>('update_settings', { settings });
   },
-  /** Saves the key in the system credential store, or removes it when `key` is null. */
-  setApiKey(provider: ProviderId, key: string | null): Promise<Settings> {
-    return invoke<Settings>('set_api_key', { provider, key });
+  /** Saves a connection to a server. It is the last of the returned connections. */
+  addConnection(name: string, endpoint: string): Promise<Settings> {
+    return invoke<Settings>('add_connection', { name, endpoint });
   },
-  /** Saves a server's address, or removes it when `endpoint` is null. */
-  setEndpoint(provider: ProviderId, endpoint: string | null): Promise<Settings> {
-    return invoke<Settings>('set_endpoint', { provider, endpoint });
+  /** Changes a connection's model, or a server's name or address. */
+  editConnection(id: string, edit: ConnectionEdit): Promise<Settings> {
+    return invoke<Settings>('edit_connection', { id, edit });
   },
-  /** Checks the saved key and address by listing the models they can use. */
-  testApiKey(provider: ProviderId): Promise<KeyTest> {
-    return invoke<KeyTest>('test_api_key', { provider });
+  /** Forgets a server and its key. */
+  removeConnection(id: string): Promise<Settings> {
+    return invoke<Settings>('remove_connection', { id });
+  },
+  /** Saves the connection's key in the system credential store, or removes it when `key` is null. */
+  setApiKey(connection: string, key: string | null): Promise<Settings> {
+    return invoke<Settings>('set_api_key', { connection, key });
+  },
+  /** Checks the connection's saved key and address by listing the models they can use. */
+  testApiKey(connection: string): Promise<KeyTest> {
+    return invoke<KeyTest>('test_api_key', { connection });
   },
 
   listProjects(): Promise<Project[]> {
     return invoke<Project[]>('list_projects');
   },
-  createProject(name: string): Promise<Project> {
-    return invoke<Project>('create_project', { name });
+  /** Creates an app that uses a saved connection and one of its models. */
+  createProject(name: string, connection: string, model: string): Promise<Project> {
+    return invoke<Project>('create_project', { name, connection, model });
+  },
+  /** Moves an app to another connection and model. */
+  setProjectService(id: string, connection: string, model: string): Promise<void> {
+    return invoke<void>('set_project_service', { id, connection, model });
   },
   renameProject(id: string, name: string): Promise<void> {
     return invoke<void>('rename_project', { id, name });
@@ -219,8 +268,9 @@ export const api = {
   pickArchive(): Promise<ArchiveInfo | null> {
     return invoke<ArchiveInfo | null>('pick_archive');
   },
-  importArchive(path: string, withConversation: boolean): Promise<Project> {
-    return invoke<Project>('import_archive', { path, withConversation });
+  /** Imports the zip as a new app. `service` is for app files alone; without it they use the last new app's. */
+  importArchive(path: string, withConversation: boolean, service: ServiceChoice | null = null): Promise<Project> {
+    return invoke<Project>('import_archive', { path, withConversation, service });
   },
   /** Puts a shortcut on the desktop that opens Transmogrifier at this app. Resolves to the shortcut's path. */
   createShortcut(id: string): Promise<string> {

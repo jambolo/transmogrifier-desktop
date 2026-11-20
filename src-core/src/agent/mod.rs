@@ -4,5 +4,5 @@ mod engine;
 pub mod prompt;
 mod tools;
 
-pub use engine::{AgentEngine, EventSink, GenerationEvent};
+pub use engine::{AgentEngine, Connector, EventSink, GenerationEvent};
 pub use tools::{ToolExecutor, path_from_partial_input};

@@ -16,7 +16,7 @@
 
 Three layers: `src-core` holds the logic and its tests, `src-tauri` exposes it as commands and owns the windows, and `src/api.ts` is the only front-end module that imports `@tauri-apps/api`.
 
-Providers are adapters behind `LlmProvider`: everything outside `llm` depends only on its provider-neutral types, and each wire format is confined to its submodule. The steps for adding a provider are in `DEVELOPMENT.md`.
+Providers are adapters behind `LlmProvider`: everything outside `llm` depends only on its provider-neutral types, and each wire format is confined to its submodule. A `ProviderId` is a wire format; a `Connection` in the settings is one service that speaks it, and only OpenAI-compatible servers can have several. The steps for adding a provider are in `DEVELOPMENT.md`.
 
 Key invariants:
 
@@ -25,4 +25,5 @@ Key invariants:
 - Conversation history is stored per provider in that provider's own wire format as opaque, append-only JSON. Never translate between providers or edit history (Claude thinking blocks must round-trip unchanged).
 - The model edits the generated site only through tools (`list_files`, `read_file`, `write_file`, `edit_file`, `delete_file`). `Workspace` rejects absolute paths, `..`, disallowed extensions, and over-limit writes; rejections are returned to the model as error tool results, not failures.
 - API keys live in the system credential store, never in `settings.json`, and never reach any webview: the front end sees only the last four characters.
+- A server's address lives only in `settings.json`. A project names its connection by ID and never carries an address, so an imported archive can't direct a saved key to another server.
 - A generated app runs in its own window (`src-tauri/src/runner.rs`), served over the `site` protocol on a per-project origin with a Content Security Policy that blocks other origins unless the `allowAppNetwork` setting is on. Only the `main` window may invoke commands: the invoke handler in `main.rs` refuses every other window, and no capability includes them. Tauri treats the `site` protocol as a local origin, so that guard is what keeps generated code away from the commands; never remove it or add a runner window to a capability.

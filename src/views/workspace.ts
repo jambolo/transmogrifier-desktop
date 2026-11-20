@@ -1,8 +1,10 @@
 // One app: the chat that makes and changes it, its files, and the controls for its window.
 
-import type { Api, ConsoleView, GenerationProgress, ProjectView, RunnerStatus, TranscriptEntry } from '../api';
+import { connectionFor } from '../api';
+import type { Api, ConsoleView, GenerationProgress, ProjectView, RunnerStatus, Settings, TranscriptEntry } from '../api';
 import { button, errorMessage, h, icon, replace, toast } from '../dom';
-import { noticeIsError, noticeText, providerLabel, retryingLabel, text, toolLabel, usageLabel } from '../strings';
+import { connectionLabel, noticeIsError, noticeText, retryingLabel, text, toolLabel, usageLabel } from '../strings';
+import { changeService } from './service';
 
 export interface WorkspaceHandlers {
   onBack: () => void;
@@ -25,6 +27,7 @@ function formatBytes(bytes: number): string {
 
 export function createWorkspaceView(api: Api, handlers: WorkspaceHandlers) {
   let view: ProjectView | null = null;
+  let settings: Settings | null = null;
   let live: LiveTurn = NO_LIVE;
   let consoleView: ConsoleView = NO_CONSOLE;
   let sideTab: 'files' | 'errors' = 'files';
@@ -84,7 +87,7 @@ export function createWorkspaceView(api: Api, handlers: WorkspaceHandlers) {
     openFile = null;
     draft.value = '';
     try {
-      [view, consoleView] = await Promise.all([api.getProject(projectId), api.getConsole(projectId)]);
+      [view, consoleView, settings] = await Promise.all([api.getProject(projectId), api.getConsole(projectId), api.getSettings()]);
     } catch (error) {
       toast(errorMessage(error), true);
       handlers.onBack();
@@ -121,14 +124,13 @@ export function createWorkspaceView(api: Api, handlers: WorkspaceHandlers) {
   function renderBar(): void {
     if (!view) return;
     const { project, runner, files } = view;
-    replace(
-      title,
-      h('h1', {}, project.name),
-      h('p', { className: 'muted' }, `${providerLabel(project.provider)} · ${project.model}`),
-    );
+    const connection = settings && connectionFor(settings, project);
+    const service = connection ? `${connectionLabel(connection)} · ${project.model}` : text.serviceMissing;
+    replace(title, h('h1', {}, project.name), h('p', { className: 'muted' }, service));
     const running = runner.running;
     replace(
       barActions,
+      connection ? null : button({ label: text.chooseService, icon: 'settings', onClick: () => void chooseService() }),
       running ? button({ label: text.reload, icon: 'retry', onClick: () => run(() => api.reloadApp(id())) }) : null,
       running ? button({ label: text.closeApp, icon: 'close', onClick: () => run(() => api.closeApp(id())) }) : null,
       button({
@@ -146,19 +148,7 @@ export function createWorkspaceView(api: Api, handlers: WorkspaceHandlers) {
     const stick = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
     const entries = view.transcript;
     if (entries.length === 0 && !generating()) {
-      const chips = text.examples.map((example) => {
-        const chip = h('button', { type: 'button', className: 'chip' }, example.label);
-        chip.addEventListener('click', () => {
-          draft.value = example.prompt;
-          renderPromptBar();
-          draft.focus();
-        });
-        return chip;
-      });
-      replace(
-        transcript,
-        h('div', { className: 'chat-empty' }, h('p', {}, text.chatEmpty), h('div', { className: 'chips' }, ...chips)),
-      );
+      replace(transcript, h('div', { className: 'chat-empty' }, h('p', {}, text.chatEmpty)));
       return;
     }
     const last = entries[entries.length - 1];
@@ -232,7 +222,21 @@ export function createWorkspaceView(api: Api, handlers: WorkspaceHandlers) {
         button({ label: text.openSettings, icon: 'settings', onClick: handlers.onOpenSettings }),
       );
     }
+    if (kind === 'PROVIDER_UNAVAILABLE') {
+      return h(
+        'div',
+        { className: 'entry' },
+        button({ label: text.chooseService, icon: 'settings', onClick: () => void chooseService() }),
+      );
+    }
     return null;
+  }
+
+  /** Moves the app to a service that is set up, then shows it. */
+  async function chooseService(): Promise<void> {
+    if (!view || !(await changeService(api, view.project))) return;
+    settings = await api.getSettings();
+    await refresh();
   }
 
   function renderPromptBar(): void {
