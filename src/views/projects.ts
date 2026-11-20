@@ -72,6 +72,7 @@ export function createProjectsView(api: Api, handlers: ProjectsHandlers) {
       item(text.exportSite, () => void exportApp(project, false)),
       item(text.backUp, () => void exportApp(project, true)),
       item(text.createShortcut, () => void createShortcut(project)),
+      item(text.resetConversation, () => void reset(project)),
       item(text.deleteApp, () => void remove(project), true),
     );
     const more = button({
@@ -116,6 +117,17 @@ export function createProjectsView(api: Api, handlers: ProjectsHandlers) {
     try {
       await api.renameProject(project.id, name);
       await refresh();
+    } catch (error) {
+      toast(errorMessage(error), true);
+    }
+  }
+
+  async function reset(project: Project): Promise<void> {
+    const confirmed = await confirmDialog(text.resetTitle(project.name), text.resetBody, { label: text.resetConversation });
+    if (!confirmed) return;
+    try {
+      await api.resetConversation(project.id);
+      toast(text.resetDone);
     } catch (error) {
       toast(errorMessage(error), true);
     }

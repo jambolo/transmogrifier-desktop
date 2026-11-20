@@ -2,6 +2,8 @@
 //! confined to its own submodule.
 
 pub mod anthropic;
+pub mod chat_completions;
+pub mod gemini;
 mod http;
 pub mod openai;
 
@@ -19,16 +21,35 @@ use serde_json::Value;
 pub enum ProviderId {
     Anthropic,
     Openai,
+    Gemini,
+    /// Any hosted service that speaks the Chat Completions format, at an address the user saves.
+    OpenaiCompatible,
+    /// A model server on the user's computer or network, in the same format.
+    Local,
 }
 
 impl ProviderId {
-    pub const ALL: [ProviderId; 2] = [ProviderId::Anthropic, ProviderId::Openai];
+    pub const ALL: [ProviderId; 5] = [
+        ProviderId::Anthropic,
+        ProviderId::Openai,
+        ProviderId::Gemini,
+        ProviderId::OpenaiCompatible,
+        ProviderId::Local,
+    ];
 
+    /// The model for new apps when the user hasn't chosen one; empty where only the user can know it.
     pub fn default_model(self) -> &'static str {
         match self {
             ProviderId::Anthropic => "claude-opus-5-5",
             ProviderId::Openai => "gpt-6.1-sol",
+            ProviderId::Gemini => "gemini-4-carbon",
+            ProviderId::OpenaiCompatible | ProviderId::Local => "",
         }
+    }
+
+    /// Whether the provider is reached at an address the user saves. Such a provider needs no API key.
+    pub fn uses_endpoint(self) -> bool {
+        matches!(self, ProviderId::OpenaiCompatible | ProviderId::Local)
     }
 }
 
@@ -51,7 +72,7 @@ pub enum Effort {
 }
 
 impl Effort {
-    /// The value both providers use on the wire.
+    /// The value Claude and OpenAI use on the wire.
     pub(crate) fn wire(self) -> &'static str {
         match self {
             Effort::Low => "low",
@@ -270,6 +291,9 @@ impl std::error::Error for LlmError {}
 
 /// Reads the provider's saved API key, or `None` when there isn't one.
 pub type KeySource = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
+/// Reads the provider's saved server address, or `None` when there isn't one.
+pub type EndpointSource = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
 #[async_trait]
 pub trait LlmProvider: Send + Sync {

@@ -12,6 +12,9 @@ fn entry(provider: ProviderId) -> Result<keyring::Entry, String> {
     let account = match provider {
         ProviderId::Anthropic => "anthropic-api-key",
         ProviderId::Openai => "openai-api-key",
+        ProviderId::Gemini => "gemini-api-key",
+        ProviderId::OpenaiCompatible => "openai-compatible-api-key",
+        ProviderId::Local => "local-api-key",
     };
     if let Err(error) = keyring::Entry::store_status() {
         return Err(explain(clone_error(error)));

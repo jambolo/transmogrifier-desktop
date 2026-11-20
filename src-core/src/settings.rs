@@ -1,5 +1,6 @@
 //! User settings and API keys. Settings are a JSON file; keys live only in a [`SecretStore`] (the operating
-//! system's credential store in the app), never in the file and never in the front end.
+//! system's credential store in the app), never in the file and never in the front end. Server addresses
+//! aren't secrets and are kept in the file.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -29,6 +30,8 @@ pub struct Settings {
     pub allow_app_network: bool,
     /// Last four characters of each saved key, for display.
     pub key_hints: BTreeMap<ProviderId, String>,
+    /// The server address of each provider that is reached at one ([`ProviderId::uses_endpoint`]).
+    pub endpoints: BTreeMap<ProviderId, String>,
 }
 
 impl Default for Settings {
@@ -42,6 +45,7 @@ impl Default for Settings {
             app_instructions: String::new(),
             allow_app_network: false,
             key_hints: BTreeMap::new(),
+            endpoints: BTreeMap::new(),
         }
     }
 }
@@ -54,6 +58,15 @@ impl Settings {
             .unwrap_or_else(|| provider.default_model().to_string())
     }
 
+    /// Whether new apps can use the provider: it has a key, or an address and a model.
+    pub fn is_ready(&self, provider: ProviderId) -> bool {
+        if provider.uses_endpoint() {
+            self.endpoints.contains_key(&provider) && !self.default_model(provider).is_empty()
+        } else {
+            self.key_hints.contains_key(&provider)
+        }
+    }
+
     /// Brings every value inside its allowed range.
     fn normalized(mut self) -> Self {
         let (low, high) = TOOL_ITERATIONS_RANGE;
@@ -62,6 +75,17 @@ impl Settings {
         self.max_output_tokens = self.max_output_tokens.clamp(low, high);
         if self.app_instructions.chars().count() > MAX_APP_INSTRUCTIONS_LENGTH {
             self.app_instructions = self.app_instructions.chars().take(MAX_APP_INSTRUCTIONS_LENGTH).collect();
+        }
+        self.default_models = std::mem::take(&mut self.default_models)
+            .into_iter()
+            .map(|(provider, model)| (provider, model.trim().to_string()))
+            .filter(|(_, model)| !model.is_empty())
+            .collect();
+        // New apps must not default to a service the user can't use.
+        if !self.is_ready(self.default_provider)
+            && let Some(ready) = ProviderId::ALL.into_iter().find(|&provider| self.is_ready(provider))
+        {
+            self.default_provider = ready;
         }
         self
     }
@@ -95,14 +119,41 @@ impl SettingsStore {
         self.read()
     }
 
-    /// Changes everything except the key hints, which only [`set_api_key`](Self::set_api_key) touches.
+    /// Changes everything except the key hints and server addresses, which only
+    /// [`set_api_key`](Self::set_api_key) and [`set_endpoint`](Self::set_endpoint) touch.
     pub fn update(&self, transform: impl FnOnce(&mut Settings)) -> Result<Settings, String> {
         let _guard = self.guard();
         let old = self.read();
         let mut new = old.clone();
         transform(&mut new);
         new.key_hints = old.key_hints;
+        new.endpoints = old.endpoints;
         self.write(new.normalized())
+    }
+
+    /// Saves the provider's server address, or removes it when it is `None`. The address is the base that
+    /// request paths are appended to, such as `http://localhost:11434/v1`.
+    pub fn set_endpoint(&self, provider: ProviderId, endpoint: Option<&str>) -> Result<Settings, String> {
+        if !provider.uses_endpoint() {
+            return Err("This AI service has a fixed address".to_string());
+        }
+        let _guard = self.guard();
+        let mut settings = self.read();
+        match endpoint.map(str::trim).filter(|endpoint| !endpoint.is_empty()) {
+            Some(endpoint) => {
+                let url = reqwest::Url::parse(endpoint).ok();
+                if !url.is_some_and(|url| matches!(url.scheme(), "http" | "https") && url.has_host()) {
+                    return Err("Enter a web address that starts with http:// or https://".to_string());
+                }
+                settings
+                    .endpoints
+                    .insert(provider, endpoint.trim_end_matches('/').to_string());
+            }
+            None => {
+                settings.endpoints.remove(&provider);
+            }
+        }
+        self.write(settings.normalized())
     }
 
     /// Saves `key`, or removes the saved key when it is `None`.
@@ -114,17 +165,13 @@ impl SettingsStore {
                 self.secrets.set(provider, key)?;
                 let skip = key.chars().count().saturating_sub(4);
                 settings.key_hints.insert(provider, key.chars().skip(skip).collect());
-                // New apps must not default to a service the user can't use.
-                if !settings.key_hints.contains_key(&settings.default_provider) {
-                    settings.default_provider = provider;
-                }
             }
             None => {
                 self.secrets.delete(provider)?;
                 settings.key_hints.remove(&provider);
             }
         }
-        self.write(settings)
+        self.write(settings.normalized())
     }
 
     /// The saved key. If the credential store has lost it, the hint is cleared so the user is asked again.
@@ -238,6 +285,71 @@ mod tests {
         let settings = store.set_api_key(ProviderId::Openai, None).unwrap();
         assert!(settings.key_hints.is_empty());
         assert_eq!(store.api_key(ProviderId::Openai), None);
+    }
+
+    #[test]
+    fn new_apps_move_to_a_service_that_is_ready() {
+        let (_dir, store) = store();
+        store.set_api_key(ProviderId::Anthropic, Some("key-1")).unwrap();
+        store.set_api_key(ProviderId::Gemini, Some("key-2")).unwrap();
+        let settings = store.update(|s| s.default_provider = ProviderId::Gemini).unwrap();
+        assert_eq!(settings.default_provider, ProviderId::Gemini);
+        let settings = store.set_api_key(ProviderId::Gemini, None).unwrap();
+        assert_eq!(settings.default_provider, ProviderId::Anthropic);
+    }
+
+    #[test]
+    fn a_server_is_ready_once_it_has_an_address_and_a_model() {
+        let (dir, store) = store();
+        assert_eq!(store.load().default_model(ProviderId::Local), "");
+        let settings = store
+            .set_endpoint(ProviderId::Local, Some(" http://localhost:11434/v1/ "))
+            .unwrap();
+        assert_eq!(
+            settings.endpoints.get(&ProviderId::Local).map(String::as_str),
+            Some("http://localhost:11434/v1")
+        );
+        assert!(!settings.is_ready(ProviderId::Local));
+        assert_eq!(settings.default_provider, ProviderId::Anthropic);
+
+        // No key is needed, and blank models don't count.
+        let settings = store
+            .update(|s| {
+                s.default_models.insert(ProviderId::Local, "  ".into());
+                s.endpoints.clear();
+            })
+            .unwrap();
+        assert!(!settings.is_ready(ProviderId::Local));
+        assert_eq!(settings.endpoints.len(), 1);
+        let settings = store
+            .update(|s| {
+                s.default_models.insert(ProviderId::Local, " qwen3-coder ".into());
+            })
+            .unwrap();
+        assert_eq!(settings.default_model(ProviderId::Local), "qwen3-coder");
+        assert_eq!(settings.default_provider, ProviderId::Local);
+        let file = fs::read_to_string(dir.path().join("settings.json")).unwrap();
+        assert!(
+            file.contains(r#""endpoints":{"LOCAL":"http://localhost:11434/v1"}"#),
+            "{file}"
+        );
+
+        let settings = store.set_endpoint(ProviderId::Local, None).unwrap();
+        assert!(settings.endpoints.is_empty());
+    }
+
+    #[test]
+    fn only_web_addresses_are_saved_and_only_for_servers() {
+        let (_dir, store) = store();
+        for bad in ["localhost:11434", "ftp://example.com", "http://", "not an address"] {
+            assert!(store.set_endpoint(ProviderId::OpenaiCompatible, Some(bad)).is_err(), "{bad}");
+        }
+        assert!(
+            store
+                .set_endpoint(ProviderId::Openai, Some("https://example.com/v1"))
+                .is_err()
+        );
+        assert!(store.load().endpoints.is_empty());
     }
 
     #[test]

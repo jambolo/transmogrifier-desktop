@@ -10,7 +10,8 @@ fn sse(fixture: &str) -> Vec<Value> {
     fixture
         .lines()
         .filter_map(|line| line.strip_prefix("data: "))
-        .map(|data| serde_json::from_str(data).unwrap())
+        // As when streaming, payloads that aren't JSON (`[DONE]`) are skipped.
+        .filter_map(|data| serde_json::from_str(data).ok())
         .collect()
 }
 
@@ -449,6 +450,453 @@ fn openai_lists_only_current_coding_models() {
         .map(|model| model.id)
         .collect();
     assert_eq!(ids, ["gpt-6.1-sol", "gpt-6-astra", "gpt-5.2-codex"]);
+}
+
+#[test]
+fn gemini_request_matches_the_wire_format() {
+    let mut request = request(ProviderId::Gemini, vec![]);
+    request.effort = Effort::Max;
+    request.max_output_tokens = 128_000;
+    let body = gemini::body(&request);
+    assert_eq!(body["systemInstruction"], json!({"parts": [{"text": prompt::SYSTEM}]}));
+    assert_eq!(
+        body["contents"],
+        json!([{"role": "user", "parts": [{"text": "A greeting page"}]}])
+    );
+    let declarations = body["tools"][0]["functionDeclarations"].as_array().unwrap();
+    assert_eq!(declarations.len(), prompt::tools().len());
+    assert_eq!(declarations[0]["name"], "list_files");
+    assert_eq!(declarations[0]["parametersJsonSchema"], prompt::tools()[0].input_schema);
+    assert_eq!(
+        body["generationConfig"],
+        json!({"maxOutputTokens": 65_536, "thinkingConfig": {"thinkingLevel": "high"}})
+    );
+
+    // Models before Gemini 3 reject thinking levels.
+    request.model = "gemini-2.5-pro".into();
+    request.max_output_tokens = 8_000;
+    assert_eq!(gemini::body(&request)["generationConfig"], json!({"maxOutputTokens": 8_000}));
+}
+
+#[test]
+fn gemini_tool_turn() {
+    let request = request(ProviderId::Gemini, vec![]);
+    let mut mapper = gemini::TurnMapper::new(&request);
+    let mut events = Vec::new();
+    for event in sse(include_str!("../../tests/fixtures/gemini-tool-turn.sse")) {
+        events.extend(mapper.on_event(&event).unwrap());
+    }
+    let turn = mapper.finish().unwrap();
+    // The call has no ID of its own, so it is named by its place in the history.
+    assert_eq!(
+        events,
+        [
+            TurnEvent::TextDelta("I'll create".into()),
+            TurnEvent::TextDelta(" the page.".into()),
+            TurnEvent::ToolCallStarted {
+                call_id: "call_1_1".into(),
+                name: "write_file".into()
+            },
+            TurnEvent::ToolInputDelta {
+                call_id: "call_1_1".into(),
+                partial_json: r#"{"path":"index.html","content":"<h1>Hi</h1>"}"#.into()
+            },
+        ]
+    );
+    assert_eq!(turn.tool_calls, [expected_call("call_1_1")]);
+    assert_eq!(turn.stop_reason, StopReason::ToolUse);
+    assert_eq!(
+        turn.usage,
+        Usage {
+            input_tokens: 100,
+            output_tokens: 42,
+            cache_read_input_tokens: 800,
+            cache_creation_input_tokens: 0
+        }
+    );
+    // Streamed text is joined; the part with a thought signature is kept exactly as sent.
+    assert_eq!(
+        turn.history.items,
+        [
+            json!({"role": "user", "parts": [{"text": "A greeting page"}]}),
+            json!({"role": "model", "parts": [
+                {"text": "I'll create the page."},
+                {"functionCall": {"name": "write_file", "args": {"path": "index.html", "content": "<h1>Hi</h1>"}}, "thoughtSignature": "sig-call"}
+            ]}),
+        ]
+    );
+
+    // The result repeats the call's name, in a content of its own ahead of any text.
+    let input = TurnInput {
+        tool_results: vec![ToolResult {
+            call_id: "call_1_1".into(),
+            content: "Wrote index.html".into(),
+            is_error: false,
+        }],
+        text: Some("Thanks".into()),
+        resume: false,
+    };
+    assert_eq!(
+        gemini::input_contents(&turn.history.items, &input),
+        [
+            json!({"role": "user", "parts": [{"functionResponse": {"name": "write_file", "response": {"output": "Wrote index.html"}}}]}),
+            json!({"role": "user", "parts": [{"text": "Thanks"}]}),
+        ]
+    );
+}
+
+#[test]
+fn gemini_results_repeat_the_ids_of_their_calls() {
+    let history = vec![
+        json!({"role": "model", "parts": [{"functionCall": {"name": "read_file", "args": {}}}]}),
+        json!({"role": "user", "parts": [{"text": "more"}]}),
+        json!({"role": "model", "parts": [
+            {"text": "Two reads."},
+            {"functionCall": {"id": "fc-a", "name": "read_file", "args": {"path": "a.js"}}},
+            {"functionCall": {"id": "fc-b", "name": "list_files", "args": {}}}
+        ]}),
+    ];
+    let result = |call_id: &str, is_error| ToolResult {
+        call_id: call_id.into(),
+        content: "text".into(),
+        is_error,
+    };
+    // A result for a call that isn't in the model's last turn has nothing to answer.
+    let input = TurnInput::results(vec![result("fc-a", false), result("fc-b", true), result("call_0_0", false)]);
+    assert_eq!(
+        gemini::input_contents(&history, &input),
+        [json!({"role": "user", "parts": [
+            {"functionResponse": {"id": "fc-a", "name": "read_file", "response": {"output": "text"}}},
+            {"functionResponse": {"id": "fc-b", "name": "list_files", "response": {"error": "text"}}}
+        ]})]
+    );
+}
+
+#[test]
+fn gemini_keeps_signed_parts_apart() {
+    let request = request(ProviderId::Gemini, vec![]);
+    let mut mapper = gemini::TurnMapper::new(&request);
+    let chunk = |parts: Value| json!({"candidates": [{"content": {"role": "model", "parts": parts}}]});
+    let mut events = Vec::new();
+    for parts in [
+        json!([{"text": "Considering", "thought": true}]),
+        json!([{"text": " it.", "thought": true}, {"text": "Done"}]),
+        json!([{"text": ".", "thoughtSignature": "sig"}]),
+        json!([{"text": " Bye"}]),
+    ] {
+        events.extend(mapper.on_event(&chunk(parts)).unwrap());
+    }
+    mapper.on_event(&json!({"candidates": [{"finishReason": "STOP"}]})).unwrap();
+    // Thought summaries aren't shown.
+    assert_eq!(events, ["Done", ".", " Bye"].map(|text| TurnEvent::TextDelta(text.into())));
+    let turn = mapper.finish().unwrap();
+    assert_eq!(turn.stop_reason, StopReason::EndTurn);
+    assert_eq!(
+        turn.history.items[1]["parts"],
+        json!([
+            {"text": "Considering it.", "thought": true},
+            {"text": "Done"},
+            {"text": ".", "thoughtSignature": "sig"},
+            {"text": " Bye"}
+        ])
+    );
+}
+
+#[test]
+fn gemini_stop_reasons() {
+    let request = request(ProviderId::Gemini, vec![]);
+    let finish = |chunks: Vec<Value>| {
+        let mut mapper = gemini::TurnMapper::new(&request);
+        for chunk in &chunks {
+            mapper.on_event(chunk).unwrap();
+        }
+        mapper.finish()
+    };
+    let call = json!({"functionCall": {"name": "list_files", "args": {}}});
+    let truncated = finish(vec![
+        json!({"candidates": [{"content": {"parts": [call]}, "finishReason": "MAX_TOKENS"}]}),
+    ])
+    .unwrap();
+    assert_eq!(truncated.stop_reason, StopReason::MaxTokens);
+    assert_eq!(truncated.tool_calls.len(), 1);
+
+    // A turn without output adds no empty content.
+    let refused = finish(vec![json!({"candidates": [{"finishReason": "SAFETY"}]})]).unwrap();
+    assert_eq!(refused.stop_reason, StopReason::Refusal);
+    assert_eq!(refused.history.items.len(), 1);
+
+    // A refused prompt leaves the history unchanged.
+    let blocked = finish(vec![json!({"promptFeedback": {"blockReason": "SAFETY"}})]).unwrap();
+    assert_eq!(blocked.stop_reason, StopReason::Refusal);
+    assert!(blocked.history.items.is_empty());
+
+    let other = finish(vec![json!({"candidates": [{"finishReason": "MALFORMED_FUNCTION_CALL"}]})]).unwrap();
+    assert_eq!(other.stop_reason, StopReason::Other);
+    assert!(finish(vec![]).unwrap_err().retryable());
+}
+
+#[test]
+fn gemini_stream_errors_are_classified() {
+    let request = request(ProviderId::Gemini, vec![]);
+    let error = |error: Value| {
+        gemini::TurnMapper::new(&request)
+            .on_event(&json!({"error": error}))
+            .unwrap_err()
+    };
+    let busy = error(json!({"code": 503, "message": "The model is overloaded.", "status": "UNAVAILABLE"}));
+    assert_eq!(busy.kind, LlmErrorKind::Server { overloaded: true });
+    assert_eq!(busy.to_string(), "The model is overloaded.");
+    assert_eq!(
+        error(json!({"code": 429, "message": "Quota"})).kind,
+        LlmErrorKind::RateLimited
+    );
+    // A bad key is a 400 whose details name the reason.
+    let bad_key = error(json!({"code": 400, "message": "API key not valid.", "details": [{"reason": "API_KEY_INVALID"}]}));
+    assert_eq!(bad_key.kind, LlmErrorKind::InvalidKey);
+    assert_eq!(
+        error(json!({"code": 400, "message": "Bad request"})).kind,
+        LlmErrorKind::Rejected
+    );
+}
+
+#[test]
+fn gemini_lists_only_text_models() {
+    let model = |name: &str, methods: &[&str]| json!({"name": name, "displayName": name.to_uppercase(), "supportedGenerationMethods": methods});
+    let page = json!({"models": [
+        model("models/gemini-3.8-flash", &["generateContent", "countTokens"]),
+        model("models/gemini-4-carbon", &["generateContent"]),
+        model("models/gemini-4-neon-image", &["generateContent"]),
+        model("models/gemini-3.8-live", &["bidiGenerateContent"]),
+        model("models/gemini-embedding-2", &["embedContent"]),
+        model("models/gemma-4-27b-it", &["generateContent"]),
+    ]});
+    let models = gemini::text_models(&page);
+    assert_eq!(
+        models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+        ["gemini-4-carbon", "gemini-3.8-flash"]
+    );
+    assert_eq!(models[0].display_name, "MODELS/GEMINI-4-CARBON");
+}
+
+#[test]
+fn chat_completions_request_matches_the_wire_format() {
+    let mut request = request(ProviderId::Local, vec![json!({"role": "user", "content": "Earlier"})]);
+    request.model = "qwen3-coder".into();
+    let body = chat_completions::body(&request);
+    // Only what every server accepts is sent.
+    assert_eq!(
+        body.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["model", "messages", "tools", "stream"]
+    );
+    assert_eq!(body["model"], "qwen3-coder");
+    assert_eq!(body["stream"], true);
+    assert_eq!(
+        body["messages"],
+        json!([
+            {"role": "system", "content": prompt::SYSTEM},
+            {"role": "user", "content": "Earlier"},
+            {"role": "user", "content": "A greeting page"}
+        ])
+    );
+    let tools = body["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), prompt::tools().len());
+    assert_eq!(tools[0]["type"], "function");
+    assert_eq!(tools[0]["function"]["name"], "list_files");
+    assert_eq!(tools[0]["function"]["parameters"], prompt::tools()[0].input_schema);
+}
+
+#[test]
+fn chat_completions_tool_turn() {
+    let request = request(ProviderId::OpenaiCompatible, vec![]);
+    let mut mapper = chat_completions::TurnMapper::new(&request);
+    let mut events = Vec::new();
+    for event in sse(include_str!("../../tests/fixtures/chat-completions-tool-turn.sse")) {
+        events.extend(mapper.on_event(&event).unwrap());
+    }
+    let turn = mapper.finish().unwrap();
+    assert_eq!(
+        events,
+        [
+            TurnEvent::TextDelta("I'll create".into()),
+            TurnEvent::TextDelta(" the page.".into()),
+            TurnEvent::ToolCallStarted {
+                call_id: "call_1".into(),
+                name: "write_file".into()
+            },
+            TurnEvent::ToolInputDelta {
+                call_id: "call_1".into(),
+                partial_json: r#"{"path":"index.html","#.into()
+            },
+            TurnEvent::ToolInputDelta {
+                call_id: "call_1".into(),
+                partial_json: r#""content":"<h1>Hi</h1>"}"#.into()
+            },
+        ]
+    );
+    assert_eq!(turn.tool_calls, [expected_call("call_1")]);
+    assert_eq!(turn.stop_reason, StopReason::ToolUse);
+    assert_eq!(
+        turn.usage,
+        Usage {
+            input_tokens: 100,
+            output_tokens: 30,
+            cache_read_input_tokens: 800,
+            cache_creation_input_tokens: 0
+        }
+    );
+    assert_eq!(
+        turn.history.items,
+        [
+            json!({"role": "user", "content": "A greeting page"}),
+            json!({"role": "assistant", "content": "I'll create the page.", "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "write_file", "arguments": r#"{"path":"index.html","content":"<h1>Hi</h1>"}"#}
+            }]}),
+        ]
+    );
+}
+
+#[test]
+fn chat_completions_tool_results_come_before_text() {
+    let input = TurnInput {
+        tool_results: vec![
+            ToolResult {
+                call_id: "call_1".into(),
+                content: "Wrote index.html".into(),
+                is_error: false,
+            },
+            ToolResult {
+                call_id: "call_2".into(),
+                content: "No such file".into(),
+                is_error: true,
+            },
+        ],
+        text: Some("Thanks".into()),
+        resume: false,
+    };
+    assert_eq!(
+        chat_completions::input_messages(&input),
+        [
+            json!({"role": "tool", "tool_call_id": "call_1", "content": "Wrote index.html"}),
+            json!({"role": "tool", "tool_call_id": "call_2", "content": "Error: No such file"}),
+            json!({"role": "user", "content": "Thanks"}),
+        ]
+    );
+    assert!(chat_completions::input_messages(&TurnInput::resume()).is_empty());
+}
+
+#[test]
+fn chat_completions_tolerates_servers_that_bend_the_format() {
+    let request = request(ProviderId::Local, vec![json!({"role": "user", "content": "Earlier"})]);
+    let mut mapper = chat_completions::TurnMapper::new(&request);
+    let chunk = |delta: Value, finish: Value| json!({"choices": [{"index": 0, "delta": delta, "finish_reason": finish}]});
+    // No IDs, every call at index 0 or none, whole arguments as an object, and "stop" for a tool turn.
+    let chunks = [
+        chunk(
+            json!({"tool_calls": [
+                {"function": {"name": "read_file", "arguments": {"path": "a.js"}}},
+                {"function": {"name": "list_files", "arguments": ""}}
+            ]}),
+            Value::Null,
+        ),
+        chunk(
+            json!({"tool_calls": [{"index": 0, "id": "x1", "function": {"name": "read_file", "arguments": "{\"path\":"}}]}),
+            Value::Null,
+        ),
+        chunk(
+            json!({"tool_calls": [{"index": 0, "id": "x2", "function": {"name": "delete_file", "arguments": "{\"path\""}}]}),
+            json!("stop"),
+        ),
+    ];
+    let mut events = Vec::new();
+    for chunk in &chunks {
+        events.extend(mapper.on_event(chunk).unwrap());
+    }
+    assert_eq!(
+        events[..3],
+        [
+            TurnEvent::ToolCallStarted {
+                call_id: "call_1_0".into(),
+                name: "read_file".into()
+            },
+            TurnEvent::ToolInputDelta {
+                call_id: "call_1_0".into(),
+                partial_json: r#"{"path":"a.js"}"#.into()
+            },
+            TurnEvent::ToolCallStarted {
+                call_id: "call_1_1".into(),
+                name: "list_files".into()
+            },
+        ]
+    );
+    let turn = mapper.finish().unwrap();
+    assert_eq!(turn.stop_reason, StopReason::ToolUse);
+    let calls: Vec<(&str, &str, &str)> = turn
+        .tool_calls
+        .iter()
+        .map(|call| (call.call_id.as_str(), call.name.as_str(), call.input_json.as_str()))
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            ("call_1_0", "read_file", r#"{"path":"a.js"}{"path":"#),
+            ("call_1_1", "list_files", "{}"),
+            ("x2", "delete_file", r#"{"path""#),
+        ]
+    );
+    // Arguments a server couldn't parse on replay are stored as an empty object.
+    let stored = &turn.history.items[2];
+    assert_eq!(stored["content"], Value::Null);
+    let arguments: Vec<&str> = stored["tool_calls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|call| call["function"]["arguments"].as_str().unwrap())
+        .collect();
+    assert_eq!(arguments, ["{}", "{}", "{}"]);
+}
+
+#[test]
+fn chat_completions_stop_reasons_and_failures() {
+    let request = request(ProviderId::OpenaiCompatible, vec![]);
+    let finish = |reason: &str| {
+        let mut mapper = chat_completions::TurnMapper::new(&request);
+        mapper
+            .on_event(&json!({"choices": [{"delta": {"content": "Hi"}, "finish_reason": reason}]}))
+            .unwrap();
+        mapper.finish().unwrap()
+    };
+    assert_eq!(finish("stop").stop_reason, StopReason::EndTurn);
+    assert_eq!(finish("length").stop_reason, StopReason::MaxTokens);
+    assert_eq!(finish("content_filter").stop_reason, StopReason::Refusal);
+    assert_eq!(finish("eos").stop_reason, StopReason::Other);
+    assert_eq!(finish("stop").history.items[1], json!({"role": "assistant", "content": "Hi"}));
+
+    // A stream that stops without a finish reason was cut off.
+    let mut cut = chat_completions::TurnMapper::new(&request);
+    cut.on_event(&json!({"choices": [{"delta": {"content": "Hi"}}]})).unwrap();
+    assert!(cut.finish().unwrap_err().retryable());
+
+    let error = |chunk: Value| chat_completions::TurnMapper::new(&request).on_event(&chunk).unwrap_err();
+    let busy = error(json!({"error": {"code": 502, "message": "Upstream failed"}}));
+    assert_eq!(busy.kind, LlmErrorKind::Server { overloaded: false });
+    assert_eq!(busy.to_string(), "Upstream failed");
+    assert_eq!(
+        error(json!({"error": {"code": "429", "message": "Slow down"}})).kind,
+        LlmErrorKind::RateLimited
+    );
+    let plain = error(json!({"error": "model not found"}));
+    assert_eq!(plain.kind, LlmErrorKind::Rejected);
+    assert_eq!(plain.to_string(), "model not found");
+}
+
+#[test]
+fn chat_completions_lists_every_model() {
+    let page = json!({"object": "list", "data": [{"id": "qwen3-coder:30b"}, {"id": "gemma4"}, {"object": "model"}]});
+    let ids: Vec<String> = chat_completions::models(&page).into_iter().map(|model| model.id).collect();
+    assert_eq!(ids, ["gemma4", "qwen3-coder:30b"]);
+    assert!(chat_completions::models(&json!({"models": []})).is_empty());
 }
 
 #[test]

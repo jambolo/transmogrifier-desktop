@@ -26,8 +26,12 @@ use tauri_plugin_opener::OpenerExt;
 use tokio_util::sync::CancellationToken;
 use transmogrifier_desktop_core::agent::{AgentEngine, GenerationEvent};
 use transmogrifier_desktop_core::llm::anthropic::AnthropicProvider;
+use transmogrifier_desktop_core::llm::chat_completions::ChatCompletionsProvider;
+use transmogrifier_desktop_core::llm::gemini::GeminiProvider;
 use transmogrifier_desktop_core::llm::openai::OpenAiProvider;
-use transmogrifier_desktop_core::llm::{KeySource, LlmError, LlmErrorKind, LlmProvider, ModelInfo, NetworkFailure, ProviderId};
+use transmogrifier_desktop_core::llm::{
+    EndpointSource, KeySource, LlmError, LlmErrorKind, LlmProvider, ModelInfo, NetworkFailure, ProviderId,
+};
 use transmogrifier_desktop_core::project::archive::{self, ImportDefaults};
 use transmogrifier_desktop_core::project::{FileEntry, NoticeKind, Project, ProjectStore, TranscriptEntry};
 use transmogrifier_desktop_core::settings::{Settings, SettingsStore};
@@ -62,16 +66,22 @@ impl AppState {
             let settings = settings.clone();
             Arc::new(move || settings.api_key(provider))
         };
-        let providers: HashMap<ProviderId, Arc<dyn LlmProvider>> = HashMap::from([
-            (
-                ProviderId::Anthropic,
-                Arc::new(AnthropicProvider::new(key(ProviderId::Anthropic))) as Arc<dyn LlmProvider>,
-            ),
-            (
-                ProviderId::Openai,
-                Arc::new(OpenAiProvider::new(key(ProviderId::Openai))) as Arc<dyn LlmProvider>,
-            ),
-        ]);
+        let endpoint = |provider: ProviderId| -> EndpointSource {
+            let settings = settings.clone();
+            Arc::new(move || settings.load().endpoints.get(&provider).cloned())
+        };
+        let server = |provider: ProviderId| -> Arc<dyn LlmProvider> {
+            Arc::new(ChatCompletionsProvider::new(provider, endpoint(provider), key(provider)))
+        };
+        let adapters: [Arc<dyn LlmProvider>; 5] = [
+            Arc::new(AnthropicProvider::new(key(ProviderId::Anthropic))),
+            Arc::new(OpenAiProvider::new(key(ProviderId::Openai))),
+            Arc::new(GeminiProvider::new(key(ProviderId::Gemini))),
+            server(ProviderId::OpenaiCompatible),
+            server(ProviderId::Local),
+        ];
+        let providers: HashMap<ProviderId, Arc<dyn LlmProvider>> =
+            adapters.into_iter().map(|adapter| (adapter.id(), adapter)).collect();
         let engine = Arc::new(AgentEngine::new(store.clone(), providers.clone()));
         Self {
             store,
@@ -208,7 +218,13 @@ async fn set_api_key(app: AppHandle, provider: ProviderId, key: Option<String>) 
     blocking(move || app.state::<AppState>().settings.set_api_key(provider, key.as_deref())).await
 }
 
-/// Checks the saved key by listing the models it can use.
+/// Saves the address of a service that is reached at one, or removes it when `endpoint` is `None`.
+#[tauri::command]
+fn set_endpoint(state: State<'_, AppState>, provider: ProviderId, endpoint: Option<String>) -> CommandResult<Settings> {
+    state.settings.set_endpoint(provider, endpoint.as_deref())
+}
+
+/// Checks the saved key and address by listing the models they can use.
 #[tauri::command]
 async fn test_api_key(state: State<'_, AppState>, provider: ProviderId) -> CommandResult<KeyTest> {
     let provider = state
@@ -241,6 +257,15 @@ fn create_project(state: State<'_, AppState>, name: String) -> CommandResult<Pro
 #[tauri::command]
 fn rename_project(state: State<'_, AppState>, id: String, name: String) -> CommandResult<()> {
     state.store.rename(&id, name.trim()).map_err(text)
+}
+
+/// Forgets an app's conversation, keeping its files and transcript. Refused while the app is generating.
+#[tauri::command]
+fn reset_conversation(state: State<'_, AppState>, id: String) -> CommandResult<()> {
+    if state.generations().contains_key(&id) {
+        return Err("Stop the app's current request first".into());
+    }
+    state.store.reset_conversation(&id).map_err(text)
 }
 
 #[tauri::command]
@@ -480,11 +505,13 @@ fn main() {
         get_settings,
         update_settings,
         set_api_key,
+        set_endpoint,
         test_api_key,
         list_projects,
         create_project,
         rename_project,
         delete_project,
+        reset_conversation,
         get_project,
         read_project_file,
         generate,
@@ -626,7 +653,8 @@ mod tests {
                 "maxOutputTokens": 64000,
                 "appInstructions": "",
                 "allowAppNetwork": false,
-                "keyHints": {}
+                "keyHints": {},
+                "endpoints": {}
             })
         );
     }

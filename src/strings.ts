@@ -1,5 +1,6 @@
 // Interface wording. Voice and vocabulary follow docs/branding/03-voice-and-messaging.md.
 
+import { usesEndpoint } from './api';
 import type { Effort, KeyTestFailure, NoticeKind, ProviderId, TranscriptEntry } from './api';
 
 export const text = {
@@ -35,6 +36,11 @@ export const text = {
   shortcutCreated: 'Added a shortcut to your desktop.',
   shortcutFailed: (detail: string) => `Couldn't add the shortcut: ${detail}`,
   shortcutAppMissing: 'The app this shortcut opens no longer exists.',
+  resetConversation: 'Reset conversation',
+  resetTitle: (name: string) => `Reset the conversation for “${name}”?`,
+  resetBody:
+    "Your AI service forgets the conversation and starts again from the app's files. The app and its files are kept. Reset when requests grow too long for your service's limits, or when changes keep going wrong. After a reset, say what you want changed, since the AI service no longer remembers earlier decisions.",
+  resetDone: 'Conversation reset. The app is unchanged.',
   deleteApp: 'Delete app',
   keepApp: 'Keep app',
   deleteTitle: (name: string) => `Delete “${name}”?`,
@@ -86,29 +92,47 @@ export const text = {
   ],
 
   // Settings
-  apiKeys: 'Connect your AI service',
+  services: 'Connect an AI service',
   setupDisclosure:
-    "You'll need an API key from your AI service. Creating and changing apps is billed to that account. A chat subscription doesn't include this API usage.",
+    "Most AI services need an API key and bill that account for creating and changing apps. A chat subscription doesn't include this API usage. A model running on your own computer is free to use.",
+  serviceReady: 'Ready',
+  serviceNeedsModel: 'Needs a model',
+  serviceNotSetUp: 'Not set up',
+  worksWith: 'Works with',
+  presetHint: 'Choose one to fill in its address.',
+  usePreset: (name: string) => `Use the address for ${name}`,
   apiKey: 'API key',
+  apiKeyOptional: 'API key (optional)',
   apiKeyHelp: (source: string) => `A connection key from ${source}. Paste it here to let Transmogrifier make and change apps.`,
   replaceKey: 'Replace key',
+  clearKey: 'Clear key',
   keyMissing: 'No key saved',
   keySaved: (hint: string) => `Saved key ending in …${hint}`,
+  address: 'Server address',
+  addressHelp: 'Where requests are sent. It usually ends in /v1.',
+  addressSaveFailed: (detail: string) => `Couldn't save the address. ${detail}`,
+  removeAddress: 'Remove address',
   test: 'Check connection',
   keyTesting: 'Checking connection…',
   keyTestPassed: (count: number) =>
     count === 1 ? 'Connected. Your key works with 1 model.' : `Connected. Your key works with ${count} models.`,
+  serverTestPassed: (count: number) =>
+    count === 1 ? 'Connected. The server has 1 model.' : `Connected. The server has ${count} models.`,
   keySaveFailed: (detail: string) => `Couldn't save the key. ${detail}`,
+  defaultModel: 'Model for new apps',
+  modelHelp: 'Check the connection to choose from the models you can use.',
+  chooseModel: 'Choose a model',
+  modelNeeded: "Check the connection to choose from the server's models, or type a model's name.",
   defaultProvider: 'AI service for new apps',
-  defaultProviderHelp: 'Each app keeps the service it was made with.',
+  defaultProviderHelp: 'Each app keeps the service and model it was made with.',
   advancedSettings: 'Advanced settings',
   hideAdvancedSettings: 'Hide advanced settings',
   advancedHelp: 'Choose how your AI service works. The defaults are ready to use.',
-  defaultModel: 'Model for new apps',
   effort: 'Thinking effort',
-  effortHelp: 'More thinking can take longer and cost more.',
+  effortHelp: 'More thinking can take longer and cost more. OpenAI-compatible services and local models use their own setting.',
   limits: 'Limits',
-  limitsHelp: 'These limits control how much work each request can do. They are not spending limits.',
+  limitsHelp:
+    'These limits control how much work each request can do. They are not spending limits. OpenAI-compatible services and local models set their own reply limit.',
   maxToolIterations: 'Steps per request',
   maxOutputTokens: 'Reply limit (tokens)',
   range: (low: number, high: number) => `${low.toLocaleString()} to ${high.toLocaleString()}`,
@@ -130,15 +154,91 @@ export const OUTPUT_TOKENS_RANGE = [1_024, 128_000] as const;
 export const DEFAULT_MODELS: Record<ProviderId, string> = {
   ANTHROPIC: 'claude-opus-5-5',
   OPENAI: 'gpt-6.1-sol',
+  GEMINI: 'gemini-4-carbon',
+  OPENAI_COMPATIBLE: '',
+  LOCAL: '',
+};
+
+/** A service a provider's adapter reaches, with its usual address when the user must enter one. */
+export interface ProviderService {
+  name: string;
+  endpoint?: string;
+}
+
+interface ProviderInfo {
+  label: string;
+  /** The company that issues the provider's API keys and bills for them. */
+  keySource: string;
+  help: string;
+  /** The major services the adapter covers. */
+  services: readonly ProviderService[];
+}
+
+const PROVIDER_INFO: Record<ProviderId, ProviderInfo> = {
+  ANTHROPIC: {
+    label: 'Claude',
+    keySource: 'Anthropic',
+    help: text.apiKeyHelp('Anthropic'),
+    services: [{ name: 'Anthropic API' }],
+  },
+  OPENAI: {
+    label: 'ChatGPT',
+    keySource: 'OpenAI',
+    help: text.apiKeyHelp('OpenAI'),
+    services: [{ name: 'OpenAI API' }],
+  },
+  GEMINI: {
+    label: 'Gemini',
+    keySource: 'Google',
+    help: text.apiKeyHelp('Google AI Studio'),
+    services: [{ name: 'Google AI Studio (Gemini API)' }],
+  },
+  OPENAI_COMPATIBLE: {
+    label: 'OpenAI-compatible',
+    keySource: 'the service',
+    help: "Any service that accepts OpenAI's chat completions format. Enter the service's address and its API key. The model must support tool calling.",
+    services: [
+      { name: 'OpenRouter', endpoint: 'https://openrouter.ai/api/v1' },
+      { name: 'Groq', endpoint: 'https://api.groq.com/openai/v1' },
+      { name: 'Together AI', endpoint: 'https://api.together.xyz/v1' },
+      { name: 'Fireworks AI', endpoint: 'https://api.fireworks.ai/inference/v1' },
+      { name: 'Mistral', endpoint: 'https://api.mistral.ai/v1' },
+      { name: 'DeepSeek', endpoint: 'https://api.deepseek.com/v1' },
+      { name: 'xAI', endpoint: 'https://api.x.ai/v1' },
+      { name: 'Cerebras', endpoint: 'https://api.cerebras.ai/v1' },
+    ],
+  },
+  LOCAL: {
+    label: 'Local model',
+    keySource: 'your server',
+    help: 'A model running on this computer or your network, through a server with an OpenAI-compatible address. Add an API key only if your server asks for one. The model must support tool calling.',
+    services: [
+      { name: 'Ollama', endpoint: 'http://localhost:11434/v1' },
+      { name: 'LM Studio', endpoint: 'http://localhost:1234/v1' },
+      { name: 'llama.cpp', endpoint: 'http://localhost:8080/v1' },
+      { name: 'vLLM', endpoint: 'http://localhost:8000/v1' },
+      { name: 'Jan', endpoint: 'http://localhost:1337/v1' },
+    ],
+  },
 };
 
 export function providerLabel(provider: ProviderId): string {
-  return provider === 'ANTHROPIC' ? 'Claude' : 'ChatGPT';
+  return PROVIDER_INFO[provider].label;
 }
 
 /** The company that issues the provider's API keys and bills for them. */
 export function providerKeySource(provider: ProviderId): string {
-  return provider === 'ANTHROPIC' ? 'Anthropic' : 'OpenAI';
+  return PROVIDER_INFO[provider].keySource;
+}
+
+/** What the provider is and what it needs, for its settings card. */
+export function providerHelp(provider: ProviderId): string {
+  return PROVIDER_INFO[provider].help;
+}
+
+/** The major services the provider's adapter covers. */
+export function providerServices(provider: ProviderId): readonly ProviderService[] {
+  return PROVIDER_INFO[provider].services;
 }
 
 export function effortLabel(effort: Effort): string {
@@ -201,6 +301,8 @@ export function noticeText(kind: NoticeKind, detail?: string): string {
       return "This app's AI service isn't available in this version, so the app can't be changed.";
     case 'IMPORTED_WITHOUT_CONVERSATION':
       return "Imported without its conversation. Your AI service starts again from the app's files.";
+    case 'CONVERSATION_RESET':
+      return "Conversation reset. Your AI service starts again from the app's files.";
   }
 }
 
@@ -209,40 +311,75 @@ export function noticeIsError(kind: NoticeKind): boolean {
   return kind === 'FAILED' || kind === 'AUTH_FAILED' || kind === 'PROVIDER_UNAVAILABLE';
 }
 
+/** Why a check of a named service failed. */
+function serviceErrorText(provider: ProviderId, error: KeyTestFailure): string {
+  const service = providerLabel(provider);
+  switch (error.kind) {
+    case 'MISSING_KEY':
+      return 'No key is saved. Paste your key above and save it.';
+    case 'INVALID_KEY':
+      return `${service} didn't recognize this key. Check that you copied all of it, or create a new one.`;
+    case 'PERMISSION_DENIED':
+      return `This key isn't allowed to use ${service}. Check its permissions in your ${providerKeySource(provider)} account.`;
+    case 'RATE_LIMITED':
+      return `${service} is getting too many requests from this key. Wait a minute and try again.`;
+    case 'OVERLOADED':
+      return `${service} is busy right now. Try again in a few minutes.`;
+    case 'SERVER':
+      return `${service} had a problem on its end. Try again later.`;
+    case 'REJECTED':
+      return `${service} refused the request.`;
+    case 'NETWORK':
+      switch (error.network) {
+        case 'HOST_NOT_FOUND':
+          return `Couldn't find the ${service} server. Check that you're connected to the internet.`;
+        case 'TIMED_OUT':
+          return `${service} took too long to respond. Check your connection and try again.`;
+        case 'CONNECTION_REFUSED':
+          return `Couldn't connect to ${service}. Check your connection, or try another network.`;
+        case 'INSECURE':
+          return `Couldn't make a secure connection to ${service}. Check that this computer's date and time are right, or try another network.`;
+        default:
+          return `The connection to ${service} failed. Check your connection and try again.`;
+      }
+  }
+}
+
+/** Why a check of a server at the user's own address failed. */
+function serverErrorText(error: KeyTestFailure): string {
+  switch (error.kind) {
+    case 'MISSING_KEY':
+    case 'INVALID_KEY':
+      return "The server didn't accept the API key. Check the key, or save one if the server needs it.";
+    case 'PERMISSION_DENIED':
+      return "This key isn't allowed to use the server. Check its permissions with the service.";
+    case 'RATE_LIMITED':
+      return 'The server is getting too many requests. Wait a minute and try again.';
+    case 'OVERLOADED':
+      return 'The server is busy right now. Try again in a few minutes.';
+    case 'SERVER':
+      return 'The server had a problem on its end. Try again later.';
+    case 'REJECTED':
+      return 'The server refused the request. Check the address; it usually ends in /v1.';
+    case 'NETWORK':
+      switch (error.network) {
+        case 'HOST_NOT_FOUND':
+          return "Couldn't find the server. Check the address.";
+        case 'TIMED_OUT':
+          return 'The server took too long to respond. Check that it is running.';
+        case 'CONNECTION_REFUSED':
+          return "Couldn't connect to the server. Check that it is running and that the address is right.";
+        case 'INSECURE':
+          return "Couldn't make a secure connection to the server. If it doesn't use https, start the address with http://.";
+        default:
+          return 'The connection to the server failed. Check the address and try again.';
+      }
+  }
+}
+
 /** Why a connection check failed, in plain language, with the service's own detail when it gave one. */
 export function keyErrorText(provider: ProviderId, error: KeyTestFailure): string {
-  const service = providerLabel(provider);
-  const explanation = (() => {
-    switch (error.kind) {
-      case 'MISSING_KEY':
-        return 'No key is saved. Paste your key above and save it.';
-      case 'INVALID_KEY':
-        return `${service} didn't recognize this key. Check that you copied all of it, or create a new one.`;
-      case 'PERMISSION_DENIED':
-        return `This key isn't allowed to use ${service}. Check its permissions in your ${providerKeySource(provider)} account.`;
-      case 'RATE_LIMITED':
-        return `${service} is getting too many requests from this key. Wait a minute and try again.`;
-      case 'OVERLOADED':
-        return `${service} is busy right now. Try again in a few minutes.`;
-      case 'SERVER':
-        return `${service} had a problem on its end. Try again later.`;
-      case 'REJECTED':
-        return `${service} refused the request.`;
-      case 'NETWORK':
-        switch (error.network) {
-          case 'HOST_NOT_FOUND':
-            return `Couldn't find the ${service} server. Check that you're connected to the internet.`;
-          case 'TIMED_OUT':
-            return `${service} took too long to respond. Check your connection and try again.`;
-          case 'CONNECTION_REFUSED':
-            return `Couldn't connect to ${service}. Check your connection, or try another network.`;
-          case 'INSECURE':
-            return `Couldn't make a secure connection to ${service}. Check that this computer's date and time are right, or try another network.`;
-          default:
-            return `The connection to ${service} failed. Check your connection and try again.`;
-        }
-    }
-  })();
+  const explanation = usesEndpoint(provider) ? serverErrorText(error) : serviceErrorText(provider, error);
   if (error.status === null) return explanation;
   const code = error.detail ? `Error ${error.status}: ${error.detail}` : `Error ${error.status}`;
   return `${explanation} ${code}`;

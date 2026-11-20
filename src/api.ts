@@ -9,8 +9,13 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
-export type ProviderId = 'ANTHROPIC' | 'OPENAI';
-export const PROVIDERS: readonly ProviderId[] = ['ANTHROPIC', 'OPENAI'];
+export type ProviderId = 'ANTHROPIC' | 'OPENAI' | 'GEMINI' | 'OPENAI_COMPATIBLE' | 'LOCAL';
+export const PROVIDERS: readonly ProviderId[] = ['ANTHROPIC', 'OPENAI', 'GEMINI', 'OPENAI_COMPATIBLE', 'LOCAL'];
+
+/** Whether the provider is reached at an address the user saves; mirrors `ProviderId::uses_endpoint`. */
+export function usesEndpoint(provider: ProviderId): boolean {
+  return provider === 'OPENAI_COMPATIBLE' || provider === 'LOCAL';
+}
 
 export type Effort = 'LOW' | 'MEDIUM' | 'HIGH' | 'XHIGH' | 'MAX';
 export const EFFORTS: readonly Effort[] = ['LOW', 'MEDIUM', 'HIGH', 'XHIGH', 'MAX'];
@@ -26,6 +31,14 @@ export interface Settings {
   allowAppNetwork: boolean;
   /** Last four characters of each saved key. The keys themselves never reach the front end. */
   keyHints: Partial<Record<ProviderId, string>>;
+  /** The server address of each provider that is reached at one. */
+  endpoints: Partial<Record<ProviderId, string>>;
+}
+
+/** Whether new apps can use the provider; mirrors `Settings::is_ready`. */
+export function providerReady(settings: Settings, provider: ProviderId): boolean {
+  if (!usesEndpoint(provider)) return settings.keyHints[provider] !== undefined;
+  return settings.endpoints[provider] !== undefined && (settings.defaultModels[provider] ?? '') !== '';
 }
 
 export interface ModelInfo {
@@ -61,7 +74,8 @@ export type NoticeKind =
   | 'AUTH_FAILED'
   | 'FAILED'
   | 'PROVIDER_UNAVAILABLE'
-  | 'IMPORTED_WITHOUT_CONVERSATION';
+  | 'IMPORTED_WITHOUT_CONVERSATION'
+  | 'CONVERSATION_RESET';
 
 export type TranscriptEntry =
   | { type: 'prompt'; text: string; fixErrors?: boolean }
@@ -136,7 +150,7 @@ export const api = {
   getSettings(): Promise<Settings> {
     return invoke<Settings>('get_settings');
   },
-  /** Saves everything except API keys and their hints. */
+  /** Saves everything except API keys, their hints, and server addresses. */
   updateSettings(settings: Settings): Promise<Settings> {
     return invoke<Settings>('update_settings', { settings });
   },
@@ -144,6 +158,11 @@ export const api = {
   setApiKey(provider: ProviderId, key: string | null): Promise<Settings> {
     return invoke<Settings>('set_api_key', { provider, key });
   },
+  /** Saves a server's address, or removes it when `endpoint` is null. */
+  setEndpoint(provider: ProviderId, endpoint: string | null): Promise<Settings> {
+    return invoke<Settings>('set_endpoint', { provider, endpoint });
+  },
+  /** Checks the saved key and address by listing the models they can use. */
   testApiKey(provider: ProviderId): Promise<KeyTest> {
     return invoke<KeyTest>('test_api_key', { provider });
   },
@@ -156,6 +175,9 @@ export const api = {
   },
   renameProject(id: string, name: string): Promise<void> {
     return invoke<void>('rename_project', { id, name });
+  },
+  resetConversation(id: string): Promise<void> {
+    return invoke<void>('reset_conversation', { id });
   },
   deleteProject(id: string): Promise<void> {
     return invoke<void>('delete_project', { id });

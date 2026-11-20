@@ -18,11 +18,13 @@ const mockApi = vi.hoisted(() => ({
   getSettings: vi.fn(),
   updateSettings: vi.fn(),
   setApiKey: vi.fn(),
+  setEndpoint: vi.fn(),
   testApiKey: vi.fn(),
   listProjects: vi.fn(),
   createProject: vi.fn(),
   renameProject: vi.fn(),
   deleteProject: vi.fn(),
+  resetConversation: vi.fn(),
   getProject: vi.fn(),
   readProjectFile: vi.fn(),
   generate: vi.fn(),
@@ -44,14 +46,10 @@ const mockApi = vi.hoisted(() => ({
   onLaunch: vi.fn(),
 }));
 
-vi.mock('./api', () => ({
-  api: mockApi,
-  PROVIDERS: ['ANTHROPIC', 'OPENAI'],
-  EFFORTS: ['LOW', 'MEDIUM', 'HIGH', 'XHIGH', 'MAX'],
-}));
+vi.mock('./api', async (importOriginal) => ({ ...(await importOriginal<typeof import('./api')>()), api: mockApi }));
 vi.mock('./styles.css', () => ({}));
 
-const settings = (keyHints: Settings['keyHints'] = { ANTHROPIC: 'abcd' }): Settings => ({
+const settings = (keyHints: Settings['keyHints'] = { ANTHROPIC: 'abcd' }, overrides: Partial<Settings> = {}): Settings => ({
   defaultProvider: 'ANTHROPIC',
   defaultModels: {},
   effort: 'HIGH',
@@ -60,6 +58,8 @@ const settings = (keyHints: Settings['keyHints'] = { ANTHROPIC: 'abcd' }): Setti
   appInstructions: '',
   allowAppNetwork: false,
   keyHints,
+  endpoints: {},
+  ...overrides,
 });
 
 const project: Project = {
@@ -112,6 +112,10 @@ const buttonNamed = (name: string, within: ParentNode = document) =>
   [...within.querySelectorAll('button')].find(
     (button) => button.textContent?.trim() === name || button.getAttribute('aria-label') === name,
   );
+/** The settings card for a provider. */
+const card = (provider: string) => app().querySelector(`[data-provider="${provider}"]`)!.closest('.card')!;
+/** Opens or closes a provider's settings card. */
+const toggle = (provider: string) => (app().querySelector(`[data-provider="${provider}"]`) as HTMLButtonElement).click();
 const click = (name: string, within?: ParentNode) => {
   const button = buttonNamed(name, within);
   if (!button) throw new Error(`No button named ${name}`);
@@ -152,11 +156,11 @@ beforeEach(() => {
 });
 
 describe('start', () => {
-  it('opens Settings on first launch, when no key is saved', async () => {
+  it('opens Settings on first launch, when no service is set up', async () => {
     mockApi.getSettings.mockResolvedValue(settings({}));
     await boot();
     expect(app().querySelector('h1')?.textContent).toBe('Settings');
-    expect(app().textContent).toContain('No key saved');
+    expect(app().textContent).toContain('Not set up');
   });
 
   it('lists the apps once a key is saved', async () => {
@@ -212,6 +216,18 @@ describe('projects', () => {
     expect(app().querySelector('footer')?.textContent).toBe(`Version ${__APP_VERSION__}`);
   });
 
+  it('opens the chat and runs the app when a generated app is clicked', async () => {
+    await openWorkspace(view({ files: [{ path: 'index.html', sizeBytes: 10 }] }));
+    expect(app().querySelector('h1')?.textContent).toBe('Tip jar');
+    expect(mockApi.runApp).toHaveBeenCalledWith('p1');
+  });
+
+  it('opens only the chat when the clicked app has no files yet', async () => {
+    await openWorkspace(view());
+    expect(app().querySelector('h1')?.textContent).toBe('Tip jar');
+    expect(mockApi.runApp).not.toHaveBeenCalled();
+  });
+
   it('creates an app from the name dialog and opens it', async () => {
     mockApi.createProject.mockResolvedValue(project);
     mockApi.getProject.mockResolvedValue(view());
@@ -247,6 +263,19 @@ describe('projects', () => {
     click('Delete app', dialog);
     await flush();
     expect(mockApi.deleteProject).toHaveBeenCalledWith('p1');
+  });
+
+  it('resets a conversation only after confirmation', async () => {
+    mockApi.resetConversation.mockResolvedValue(undefined);
+    await boot();
+    click('More options for Tip jar');
+    click('Reset conversation');
+    const dialog = document.querySelector('dialog')!;
+    expect(dialog.textContent).toContain('Reset the conversation for “Tip jar”?');
+    expect(mockApi.resetConversation).not.toHaveBeenCalled();
+    click('Reset conversation', dialog);
+    await flush();
+    expect(mockApi.resetConversation).toHaveBeenCalledWith('p1');
   });
 
   it('asks whether to keep a backup’s conversation when importing', async () => {
@@ -382,16 +411,93 @@ describe('settings', () => {
     mockApi.setApiKey.mockResolvedValue(settings({ OPENAI: '1234' }));
     mockApi.testApiKey.mockResolvedValue({ result: 'passed', models: [{ id: 'gpt-6.1-sol', displayName: 'gpt-6.1-sol' }] });
     await boot();
-    const cards = app().querySelectorAll('.card');
-    (cards[1].querySelector('input') as HTMLInputElement).value = ' sk-test-1234 ';
-    click('Save', cards[1]);
+    // Nothing is set up yet, so every card starts closed.
+    expect(app().querySelectorAll('.card.open')).toHaveLength(0);
+    expect(card('OPENAI').textContent).toContain('Not set up');
+    toggle('OPENAI');
+    (card('OPENAI').querySelector('input') as HTMLInputElement).value = ' sk-test-1234 ';
+    click('Save', card('OPENAI'));
     await flush();
     expect(mockApi.setApiKey).toHaveBeenCalledWith('OPENAI', 'sk-test-1234');
-    expect(app().textContent).toContain('Saved key ending in …1234');
+    expect(card('OPENAI').textContent).toContain('Saved key ending in …1234');
+    expect(card('OPENAI').textContent).toContain('Ready');
     mockApi.getSettings.mockResolvedValue(settings({ OPENAI: '1234' }));
     click('Check connection');
     await flush();
     expect(app().querySelector('.success')?.textContent).toBe('Connected. Your key works with 1 model.');
+    // The model for new apps is chosen from what the check found.
+    expect(card('OPENAI').querySelector('select')?.value).toBe('gpt-6.1-sol');
+  });
+
+  it('shows the services each adapter covers', async () => {
+    await boot();
+    document.getElementById('open-settings')!.click();
+    await flush();
+    // The service that is set up starts open; the rest are closed.
+    expect([...app().querySelectorAll('.card.open')]).toEqual([card('ANTHROPIC')]);
+    expect(card('ANTHROPIC').textContent).toContain('Works with Anthropic API');
+    expect(card('GEMINI').textContent).toContain('Works with Google AI Studio (Gemini API)');
+    expect(card('OPENAI_COMPATIBLE').textContent).toContain(
+      'Works with OpenRouter, Groq, Together AI, Fireworks AI, Mistral, DeepSeek, xAI, Cerebras',
+    );
+    expect(card('LOCAL').textContent).toContain('Works with Ollama, LM Studio, llama.cpp, vLLM, Jan');
+    toggle('ANTHROPIC');
+    expect(app().querySelectorAll('.card.open')).toHaveLength(0);
+  });
+
+  it('sets up a local server with an address, no key, and a model', async () => {
+    const address = 'http://localhost:1234/v1';
+    const saved = settings({}, { endpoints: { LOCAL: address } });
+    mockApi.getSettings.mockResolvedValue(settings({}));
+    mockApi.setEndpoint.mockResolvedValue(saved);
+    mockApi.updateSettings.mockImplementation(async (next: Settings) => next);
+    mockApi.testApiKey.mockResolvedValue({
+      result: 'passed',
+      models: [
+        { id: 'gemma4', displayName: 'gemma4' },
+        { id: 'qwen3-coder', displayName: 'qwen3-coder' },
+      ],
+    });
+    await boot();
+    toggle('LOCAL');
+    expect(card('LOCAL').textContent).toContain('API key (optional)');
+    // Choosing a service fills in its usual address.
+    click('LM Studio', card('LOCAL'));
+    expect((card('LOCAL').querySelector('input') as HTMLInputElement).value).toBe(address);
+    click('Save', card('LOCAL'));
+    await flush();
+    expect(mockApi.setEndpoint).toHaveBeenCalledWith('LOCAL', address);
+    expect(card('LOCAL').textContent).toContain('Needs a model');
+    mockApi.getSettings.mockResolvedValue(saved);
+    click('Check connection', card('LOCAL'));
+    await flush();
+    expect(app().querySelector('.success')?.textContent).toBe('Connected. The server has 2 models.');
+    const model = card('LOCAL').querySelector('select') as HTMLSelectElement;
+    expect(model.value).toBe('');
+    model.value = 'qwen3-coder';
+    model.dispatchEvent(new Event('change'));
+    await flush();
+    expect(mockApi.updateSettings).toHaveBeenCalledWith(expect.objectContaining({ defaultModels: { LOCAL: 'qwen3-coder' } }));
+    expect(card('LOCAL').textContent).toContain('Ready');
+    expect(mockApi.setApiKey).not.toHaveBeenCalled();
+  });
+
+  it('offers a choice of service for new apps once two are ready', async () => {
+    const both = settings(
+      { ANTHROPIC: 'abcd' },
+      { endpoints: { LOCAL: 'http://localhost:11434/v1' }, defaultModels: { LOCAL: 'gemma4' } },
+    );
+    mockApi.getSettings.mockResolvedValue(both);
+    mockApi.updateSettings.mockImplementation(async (next: Settings) => next);
+    await boot();
+    document.getElementById('open-settings')!.click();
+    await flush();
+    const radios = [...app().querySelectorAll<HTMLInputElement>('input[type="radio"]')];
+    expect(radios.map((radio) => radio.parentElement?.textContent)).toEqual(['Claude', 'Local model']);
+    radios[1].checked = true;
+    radios[1].dispatchEvent(new Event('change'));
+    await flush();
+    expect(mockApi.updateSettings).toHaveBeenCalledWith(expect.objectContaining({ defaultProvider: 'LOCAL' }));
   });
 
   it('explains a failed connection check', async () => {

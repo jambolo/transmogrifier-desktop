@@ -100,6 +100,8 @@ pub enum NoticeKind {
     ProviderUnavailable,
     /// The project was imported without its conversation; the model starts again from the current files.
     ImportedWithoutConversation,
+    /// The user reset the conversation; the model starts again from the current files.
+    ConversationReset,
 }
 
 /// The provider conversation for one project: append-only `history` plus `pending` input that has not been sent
@@ -213,6 +215,20 @@ impl ProjectStore {
             Some(dir) if dir.is_dir() => Ok(fs::remove_dir_all(dir)?),
             _ => Ok(()),
         }
+    }
+
+    /// Forgets the conversation so the model starts again from the site's files; the site stays and the
+    /// transcript gains a [`NoticeKind::ConversationReset`] notice.
+    pub fn reset_conversation(&self, id: &str) -> Result<(), StoreError> {
+        {
+            let _guard = self.guard();
+            let dir = self.existing_dir(id)?;
+            match fs::remove_file(dir.join(CONVERSATION)) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+                _ => {}
+            }
+        }
+        self.append_transcript(id, &TranscriptEntry::notice(NoticeKind::ConversationReset))
     }
 
     /// The transcript, without lines this version can't read.
@@ -530,6 +546,32 @@ mod tests {
             .unwrap();
         assert!(matches!(
             store.save_conversation("missing", &conversation),
+            Err(StoreError::UnknownProject(_))
+        ));
+    }
+
+    #[test]
+    fn resetting_the_conversation_keeps_the_transcript_and_site() {
+        let (_dir, store) = store();
+        let project = store.create("A", ProviderId::Anthropic, "m").unwrap();
+        store
+            .append_transcript(&project.id, &TranscriptEntry::Reply { text: "one".into() })
+            .unwrap();
+        store
+            .save_conversation(&project.id, &Conversation::new(ProviderId::Anthropic))
+            .unwrap();
+        store.reset_conversation(&project.id).unwrap();
+        assert_eq!(store.conversation(&project.id).unwrap(), None);
+        assert_eq!(
+            store.transcript(&project.id),
+            vec![
+                TranscriptEntry::Reply { text: "one".into() },
+                TranscriptEntry::notice(NoticeKind::ConversationReset)
+            ]
+        );
+        store.reset_conversation(&project.id).unwrap();
+        assert!(matches!(
+            store.reset_conversation("missing"),
             Err(StoreError::UnknownProject(_))
         ));
     }

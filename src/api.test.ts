@@ -35,8 +35,10 @@ describe('api', () => {
     const calls = record();
     await api.getSettings();
     await api.setApiKey('OPENAI', null);
+    await api.setEndpoint('LOCAL', 'http://localhost:11434/v1');
     await api.testApiKey('ANTHROPIC');
     await api.renameProject('p1', 'Tip jar');
+    await api.resetConversation('p1');
     await api.deleteProject('p1');
     await api.getProject('p1');
     await api.readProjectFile('p1', 'js/app.js');
@@ -56,8 +58,10 @@ describe('api', () => {
     expect(calls).toEqual([
       { cmd: 'get_settings', args: {} },
       { cmd: 'set_api_key', args: { provider: 'OPENAI', key: null } },
+      { cmd: 'set_endpoint', args: { provider: 'LOCAL', endpoint: 'http://localhost:11434/v1' } },
       { cmd: 'test_api_key', args: { provider: 'ANTHROPIC' } },
       { cmd: 'rename_project', args: { id: 'p1', name: 'Tip jar' } },
+      { cmd: 'reset_conversation', args: { id: 'p1' } },
       { cmd: 'delete_project', args: { id: 'p1' } },
       { cmd: 'get_project', args: { id: 'p1' } },
       { cmd: 'read_project_file', args: { id: 'p1', path: 'js/app.js' } },
