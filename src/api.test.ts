@@ -27,16 +27,21 @@ describe('api', () => {
   it('passes the backend response through untouched', async () => {
     const project = { id: 'p1', name: 'Tips' };
     const calls = record(project);
-    expect(await api.createProject('Tips')).toEqual(project);
-    expect(calls).toEqual([{ cmd: 'create_project', args: { name: 'Tips' } }]);
+    expect(await api.createProject('Tips', 'anthropic', 'claude-opus-5-5')).toEqual(project);
+    expect(calls).toEqual([{ cmd: 'create_project', args: { name: 'Tips', connection: 'anthropic', model: 'claude-opus-5-5' } }]);
   });
 
   it('invokes each command with the argument shape the shell expects', async () => {
     const calls = record();
     await api.getSettings();
-    await api.setApiKey('OPENAI', null);
-    await api.testApiKey('ANTHROPIC');
+    await api.addConnection('Ollama', 'http://localhost:11434/v1');
+    await api.editConnection('c1', { model: 'gemma4' });
+    await api.removeConnection('c1');
+    await api.setApiKey('openai', null);
+    await api.testApiKey('anthropic');
+    await api.setProjectService('p1', 'c1', 'gemma4');
     await api.renameProject('p1', 'Tip jar');
+    await api.resetConversation('p1');
     await api.deleteProject('p1');
     await api.getProject('p1');
     await api.readProjectFile('p1', 'js/app.js');
@@ -50,14 +55,20 @@ describe('api', () => {
     await api.exportProject('p1', true);
     await api.pickArchive();
     await api.importArchive('/tmp/a.zip', false);
+    await api.importArchive('/tmp/b.zip', false, { connection: 'c1', model: 'gemma4' });
     await api.createShortcut('p1');
     await api.takeLaunchRequest();
     await api.openExternal('https://example.com');
     expect(calls).toEqual([
       { cmd: 'get_settings', args: {} },
-      { cmd: 'set_api_key', args: { provider: 'OPENAI', key: null } },
-      { cmd: 'test_api_key', args: { provider: 'ANTHROPIC' } },
+      { cmd: 'add_connection', args: { name: 'Ollama', endpoint: 'http://localhost:11434/v1' } },
+      { cmd: 'edit_connection', args: { id: 'c1', edit: { model: 'gemma4' } } },
+      { cmd: 'remove_connection', args: { id: 'c1' } },
+      { cmd: 'set_api_key', args: { connection: 'openai', key: null } },
+      { cmd: 'test_api_key', args: { connection: 'anthropic' } },
+      { cmd: 'set_project_service', args: { id: 'p1', connection: 'c1', model: 'gemma4' } },
       { cmd: 'rename_project', args: { id: 'p1', name: 'Tip jar' } },
+      { cmd: 'reset_conversation', args: { id: 'p1' } },
       { cmd: 'delete_project', args: { id: 'p1' } },
       { cmd: 'get_project', args: { id: 'p1' } },
       { cmd: 'read_project_file', args: { id: 'p1', path: 'js/app.js' } },
@@ -70,7 +81,11 @@ describe('api', () => {
       { cmd: 'get_console', args: { id: 'p1' } },
       { cmd: 'export_project', args: { id: 'p1', backup: true } },
       { cmd: 'pick_archive', args: {} },
-      { cmd: 'import_archive', args: { path: '/tmp/a.zip', withConversation: false } },
+      { cmd: 'import_archive', args: { path: '/tmp/a.zip', withConversation: false, service: null } },
+      {
+        cmd: 'import_archive',
+        args: { path: '/tmp/b.zip', withConversation: false, service: { connection: 'c1', model: 'gemma4' } },
+      },
       { cmd: 'create_shortcut', args: { id: 'p1' } },
       { cmd: 'take_launch_request', args: {} },
       { cmd: 'open_external', args: { url: 'https://example.com' } },

@@ -19,18 +19,16 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tokio_util::sync::CancellationToken;
 use transmogrifier_desktop_core::agent::{AgentEngine, GenerationEvent};
-use transmogrifier_desktop_core::llm::anthropic::AnthropicProvider;
-use transmogrifier_desktop_core::llm::openai::OpenAiProvider;
-use transmogrifier_desktop_core::llm::{KeySource, LlmError, LlmErrorKind, LlmProvider, ModelInfo, NetworkFailure, ProviderId};
+use transmogrifier_desktop_core::llm::{self, KeySource, LlmError, LlmErrorKind, LlmProvider, ModelInfo, NetworkFailure};
 use transmogrifier_desktop_core::project::archive::{self, ImportDefaults};
 use transmogrifier_desktop_core::project::{FileEntry, NoticeKind, Project, ProjectStore, TranscriptEntry};
-use transmogrifier_desktop_core::settings::{Settings, SettingsStore};
+use transmogrifier_desktop_core::settings::{Connection, ConnectionEdit, Settings, SettingsStore};
 
 use runner::{ConsoleView, RunnerStatus, Runners};
 
@@ -39,10 +37,12 @@ pub const MAIN_WINDOW: &str = "main";
 
 const EXTERNAL_SCHEMES: [&str; 4] = ["http:", "https:", "mailto:", "tel:"];
 
+const UNKNOWN_SERVICE: &str = "This AI service is no longer set up";
+const STOP_FIRST: &str = "Stop the app's current request first";
+
 pub struct AppState {
     store: Arc<ProjectStore>,
     settings: Arc<SettingsStore>,
-    providers: HashMap<ProviderId, Arc<dyn LlmProvider>>,
     engine: Arc<AgentEngine>,
     /// Generations in progress, by project ID.
     generations: Mutex<HashMap<String, CancellationToken>>,
@@ -58,25 +58,16 @@ impl AppState {
             data_dir.join("settings.json"),
             Box::new(secrets::KeyringSecrets),
         ));
-        let key = |provider: ProviderId| -> KeySource {
+        let engine = {
             let settings = settings.clone();
-            Arc::new(move || settings.api_key(provider))
+            Arc::new(AgentEngine::new(
+                store.clone(),
+                Arc::new(move |connection| connect(&settings, connection)),
+            ))
         };
-        let providers: HashMap<ProviderId, Arc<dyn LlmProvider>> = HashMap::from([
-            (
-                ProviderId::Anthropic,
-                Arc::new(AnthropicProvider::new(key(ProviderId::Anthropic))) as Arc<dyn LlmProvider>,
-            ),
-            (
-                ProviderId::Openai,
-                Arc::new(OpenAiProvider::new(key(ProviderId::Openai))) as Arc<dyn LlmProvider>,
-            ),
-        ]);
-        let engine = Arc::new(AgentEngine::new(store.clone(), providers.clone()));
         Self {
             store,
             settings,
-            providers,
             engine,
             generations: Mutex::default(),
             runners: Runners::default(),
@@ -87,6 +78,13 @@ impl AppState {
     fn generations(&self) -> std::sync::MutexGuard<'_, HashMap<String, CancellationToken>> {
         self.generations.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+}
+
+/// The adapter that reaches a connection. Its key is read from the credential store for each request.
+fn connect(settings: &Arc<SettingsStore>, connection: &Connection) -> Arc<dyn LlmProvider> {
+    let (settings, id) = (settings.clone(), connection.id.clone());
+    let key: KeySource = Arc::new(move || settings.api_key(&id));
+    llm::adapter(connection.protocol, connection.endpoint.clone(), key)
 }
 
 // ---------------------------------------------------------------------------
@@ -153,7 +151,17 @@ enum KeyTest {
 struct ArchiveInfo {
     path: String,
     name: String,
+    /// Whether the zip is a backup, which says what service made the app.
+    has_project: bool,
     has_conversation: bool,
+}
+
+/// The connection and model the user chose for an app.
+#[derive(Deserialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct ServiceChoice {
+    connection: String,
+    model: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -196,26 +204,43 @@ fn get_settings(state: State<'_, AppState>) -> Settings {
     state.settings.load()
 }
 
-/// Saves everything except API keys and their hints.
+/// Saves everything except the connections.
 #[tauri::command]
 fn update_settings(state: State<'_, AppState>, settings: Settings) -> CommandResult<Settings> {
     state.settings.update(|current| *current = settings)
 }
 
-/// Saves the key in the credential store, or removes it when `key` is `None`.
+/// Saves a connection to a server at `endpoint`. It is the last of the returned connections.
 #[tauri::command]
-async fn set_api_key(app: AppHandle, provider: ProviderId, key: Option<String>) -> CommandResult<Settings> {
-    blocking(move || app.state::<AppState>().settings.set_api_key(provider, key.as_deref())).await
+fn add_connection(state: State<'_, AppState>, name: String, endpoint: String) -> CommandResult<Settings> {
+    state.settings.add_connection(&name, &endpoint)
 }
 
-/// Checks the saved key by listing the models it can use.
+/// Changes a connection's model, or a server's name or address.
 #[tauri::command]
-async fn test_api_key(state: State<'_, AppState>, provider: ProviderId) -> CommandResult<KeyTest> {
-    let provider = state
-        .providers
-        .get(&provider)
-        .ok_or("This AI service isn't available")?
-        .clone();
+fn edit_connection(state: State<'_, AppState>, id: String, edit: ConnectionEdit) -> CommandResult<Settings> {
+    state.settings.edit_connection(&id, edit)
+}
+
+/// Forgets a server and its key.
+#[tauri::command]
+async fn remove_connection(app: AppHandle, id: String) -> CommandResult<Settings> {
+    blocking(move || app.state::<AppState>().settings.remove_connection(&id)).await
+}
+
+/// Saves the connection's key in the credential store, or removes it when `key` is `None`.
+#[tauri::command]
+async fn set_api_key(app: AppHandle, connection: String, key: Option<String>) -> CommandResult<Settings> {
+    blocking(move || app.state::<AppState>().settings.set_api_key(&connection, key.as_deref())).await
+}
+
+/// Checks the connection's saved key and address by listing the models they can use.
+#[tauri::command]
+async fn test_api_key(state: State<'_, AppState>, connection: String) -> CommandResult<KeyTest> {
+    let provider = {
+        let settings = state.settings.load();
+        connect(&state.settings, settings.connection(&connection).ok_or(UNKNOWN_SERVICE)?)
+    };
     Ok(match provider.list_models().await {
         Ok(models) => KeyTest::Passed { models },
         Err(error) => KeyTest::Failed { error: error.into() },
@@ -227,20 +252,56 @@ fn list_projects(state: State<'_, AppState>) -> Vec<Project> {
     state.store.projects()
 }
 
-/// Creates an app with the service and model chosen for new apps.
+/// The model the user chose, which can't be blank.
+fn chosen(model: &str) -> CommandResult<&str> {
+    Some(model.trim())
+        .filter(|model| !model.is_empty())
+        .ok_or("Choose a model".to_string())
+}
+
+/// Creates an app that uses a saved connection and one of its models. The next new app starts with the same
+/// connection.
 #[tauri::command]
-fn create_project(state: State<'_, AppState>, name: String) -> CommandResult<Project> {
+fn create_project(state: State<'_, AppState>, name: String, connection: String, model: String) -> CommandResult<Project> {
     let settings = state.settings.load();
-    let provider = settings.default_provider;
+    let connection = settings.connection(&connection).ok_or(UNKNOWN_SERVICE)?;
+    let project = state
+        .store
+        .create(name.trim(), connection.protocol, chosen(&model)?, connection.reference())
+        .map_err(text)?;
+    let _ = state
+        .settings
+        .update(|settings| settings.last_connection = connection.id.clone());
+    Ok(project)
+}
+
+/// Moves an app to another connection and model. Its conversation continues unless the new connection speaks
+/// another format. Refused while the app is generating.
+#[tauri::command]
+fn set_project_service(state: State<'_, AppState>, id: String, connection: String, model: String) -> CommandResult<()> {
+    if state.generations().contains_key(&id) {
+        return Err(STOP_FIRST.into());
+    }
+    let settings = state.settings.load();
+    let connection = settings.connection(&connection).ok_or(UNKNOWN_SERVICE)?;
     state
         .store
-        .create(name.trim(), provider, &settings.default_model(provider))
+        .set_service(&id, connection.protocol, chosen(&model)?, connection.reference())
         .map_err(text)
 }
 
 #[tauri::command]
 fn rename_project(state: State<'_, AppState>, id: String, name: String) -> CommandResult<()> {
     state.store.rename(&id, name.trim()).map_err(text)
+}
+
+/// Forgets an app's conversation, keeping its files and transcript. Refused while the app is generating.
+#[tauri::command]
+fn reset_conversation(state: State<'_, AppState>, id: String) -> CommandResult<()> {
+    if state.generations().contains_key(&id) {
+        return Err(STOP_FIRST.into());
+    }
+    state.store.reset_conversation(&id).map_err(text)
 }
 
 #[tauri::command]
@@ -416,6 +477,7 @@ async fn pick_archive(app: AppHandle) -> CommandResult<Option<ArchiveInfo>> {
         let contents = read_archive(&path)?;
         Ok(Some(ArchiveInfo {
             path: path.to_string_lossy().into_owned(),
+            has_project: contents.has_project(),
             has_conversation: contents.has_conversation(),
             name: contents.name,
         }))
@@ -423,19 +485,41 @@ async fn pick_archive(app: AppHandle) -> CommandResult<Option<ArchiveInfo>> {
     .await
 }
 
-/// Imports a zip as a new app. An archive without a project uses the service and model for new apps.
+/// Imports a zip as a new app. A backup keeps the service that made it. An archive without a project is a new
+/// app in effect: it uses `service`, or without one the connection new apps start with and its model.
 #[tauri::command]
-async fn import_archive(app: AppHandle, path: String, with_conversation: bool) -> CommandResult<Project> {
+async fn import_archive(
+    app: AppHandle,
+    path: String,
+    with_conversation: bool,
+    service: Option<ServiceChoice>,
+) -> CommandResult<Project> {
     blocking(move || {
         let state = app.state::<AppState>();
         let contents = read_archive(Path::new(&path))?;
         let settings = state.settings.load();
-        let provider = settings.default_provider;
-        let defaults = ImportDefaults {
-            provider,
-            model: settings.default_model(provider),
+        let (connection, model) = match &service {
+            Some(choice) => (
+                settings.connection(&choice.connection).ok_or(UNKNOWN_SERVICE)?,
+                chosen(&choice.model)?,
+            ),
+            None => {
+                let connection = settings.new_app_connection();
+                (connection, connection.effective_model())
+            }
         };
-        archive::import(&state.store, &contents, &defaults, with_conversation).map_err(text)
+        let defaults = ImportDefaults {
+            provider: connection.protocol,
+            connection: connection.reference().map(str::to_string),
+            model: model.to_string(),
+        };
+        let project = archive::import(&state.store, &contents, &defaults, with_conversation).map_err(text)?;
+        if service.is_some() && !contents.has_project() {
+            let _ = state
+                .settings
+                .update(|settings| settings.last_connection = connection.id.clone());
+        }
+        Ok(project)
     })
     .await
 }
@@ -479,12 +563,17 @@ fn main() {
     let commands: Box<dyn Fn(tauri::ipc::Invoke) -> bool + Send + Sync> = Box::new(tauri::generate_handler![
         get_settings,
         update_settings,
+        add_connection,
+        edit_connection,
+        remove_connection,
         set_api_key,
         test_api_key,
         list_projects,
         create_project,
+        set_project_service,
         rename_project,
         delete_project,
+        reset_conversation,
         get_project,
         read_project_file,
         generate,
@@ -619,15 +708,71 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Settings::default()).unwrap(),
             json!({
-                "defaultProvider": "ANTHROPIC",
-                "defaultModels": {},
+                "connections": [
+                    {"id": "anthropic", "name": "", "protocol": "ANTHROPIC", "model": ""},
+                    {"id": "openai", "name": "", "protocol": "OPENAI", "model": ""},
+                    {"id": "gemini", "name": "", "protocol": "GEMINI", "model": ""}
+                ],
+                "lastConnection": "anthropic",
                 "effort": "HIGH",
                 "maxToolIterations": 30,
                 "maxOutputTokens": 64000,
                 "appInstructions": "",
-                "allowAppNetwork": false,
-                "keyHints": {}
+                "allowAppNetwork": false
             })
+        );
+        let server = Connection {
+            id: "c1".into(),
+            name: "Ollama".into(),
+            protocol: llm::ProviderId::OpenaiCompatible,
+            endpoint: Some("http://localhost:11434/v1".into()),
+            model: "gemma4".into(),
+            key_hint: Some("abcd".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(server).unwrap(),
+            json!({
+                "id": "c1",
+                "name": "Ollama",
+                "protocol": "OPENAI_COMPATIBLE",
+                "endpoint": "http://localhost:11434/v1",
+                "model": "gemma4",
+                "keyHint": "abcd"
+            })
+        );
+    }
+
+    #[test]
+    fn a_connection_edit_reads_the_fields_the_frontend_sends() {
+        let edit: ConnectionEdit = serde_json::from_value(json!({"model": "gemma4"})).unwrap();
+        assert_eq!(
+            edit,
+            ConnectionEdit {
+                model: Some("gemma4".into()),
+                ..ConnectionEdit::default()
+            }
+        );
+    }
+
+    #[test]
+    fn archive_info_and_the_service_choice_match_the_frontend() {
+        let info = ArchiveInfo {
+            path: "/tmp/a.zip".into(),
+            name: "Tips".into(),
+            has_project: false,
+            has_conversation: false,
+        };
+        assert_eq!(
+            serde_json::to_value(&info).unwrap(),
+            json!({"path": "/tmp/a.zip", "name": "Tips", "hasProject": false, "hasConversation": false})
+        );
+        let choice: ServiceChoice = serde_json::from_value(json!({"connection": "c1", "model": "gemma4"})).unwrap();
+        assert_eq!(
+            choice,
+            ServiceChoice {
+                connection: "c1".into(),
+                model: "gemma4".into()
+            }
         );
     }
 

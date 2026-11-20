@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use super::*;
-use crate::llm::{ModelInfo, Usage};
+use crate::llm::{ModelInfo, ProviderId, Usage};
 
 enum Step {
     /// Streams `text`, then finishes with `calls` and `stop`.
@@ -105,10 +105,12 @@ impl Fixture {
             steps: Mutex::new(steps.into()),
             ..Default::default()
         });
-        let providers: HashMap<ProviderId, Arc<dyn LlmProvider>> =
-            HashMap::from([(ProviderId::Anthropic, provider.clone() as Arc<dyn LlmProvider>)]);
-        let engine = AgentEngine::with_retry_delays(store.clone(), providers, vec![Duration::ZERO; 2]);
-        let project = store.create("Tips", ProviderId::Anthropic, "claude-opus-5-5").unwrap();
+        let connect: Connector = {
+            let provider = provider.clone();
+            Arc::new(move |_| provider.clone())
+        };
+        let engine = AgentEngine::with_retry_delays(store.clone(), connect, vec![Duration::ZERO; 2]);
+        let project = store.create("Tips", ProviderId::Anthropic, "claude-opus-5-5", None).unwrap();
         Self {
             _dir: dir,
             store,
@@ -513,11 +515,14 @@ async fn a_conversation_from_another_provider_starts_over() {
 }
 
 #[tokio::test]
-async fn a_project_without_its_provider_says_so() {
+async fn a_project_without_its_connection_says_so() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(ProjectStore::new(dir.path()));
-    let engine = AgentEngine::new(store.clone(), HashMap::new());
-    let project = store.create("Tips", ProviderId::Openai, "gpt-6.1-sol").unwrap();
+    let engine = AgentEngine::new(store.clone(), Arc::new(|_| panic!("nothing to connect to")));
+    // The server the app was made with has been removed.
+    let project = store
+        .create("Tips", ProviderId::OpenaiCompatible, "qwen3-coder", Some("removed"))
+        .unwrap();
     let cancel = CancellationToken::new();
     engine
         .generate(&project.id, Some("Hi"), false, &Settings::default(), &cancel, &|_| {})

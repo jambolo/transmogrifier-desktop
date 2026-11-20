@@ -1,9 +1,11 @@
 // The list of apps: create, open, rename, export, back up, import, and delete.
 
-import type { Api, Project } from '../api';
+import { connectionFor } from '../api';
+import type { Api, Project, ServiceChoice, Settings } from '../api';
 import { button, confirmDialog, errorMessage, h, promptDialog, replace, showDialog, toast } from '../dom';
-import { providerLabel, relativeTime, text } from '../strings';
+import { connectionLabel, providerLabel, relativeTime, text } from '../strings';
 import emptyState from '../assets/empty-state.svg';
+import { changeService, readyConnections, servicePicker } from './service';
 
 export interface ProjectsHandlers {
   onOpen: (id: string) => void;
@@ -19,6 +21,7 @@ function accent(id: string): string {
 }
 
 export function createProjectsView(api: Api, handlers: ProjectsHandlers) {
+  let settings: Settings | null = null;
   const list = h('div', { className: 'app-grid' });
   const root = h(
     'section',
@@ -39,7 +42,8 @@ export function createProjectsView(api: Api, handlers: ProjectsHandlers) {
   );
 
   async function refresh(): Promise<void> {
-    const projects = await api.listProjects();
+    const [projects, saved] = await Promise.all([api.listProjects(), api.getSettings()]);
+    settings = saved;
     if (projects.length === 0) {
       replace(
         list,
@@ -54,6 +58,12 @@ export function createProjectsView(api: Api, handlers: ProjectsHandlers) {
       return;
     }
     replace(list, ...projects.map(card));
+  }
+
+  /** The name of the app's service, or of its kind when the service isn't set up here. */
+  function serviceLabel(project: Project): string {
+    const connection = settings && connectionFor(settings, project);
+    return connection ? connectionLabel(connection) : providerLabel(project.provider);
   }
 
   function card(project: Project): HTMLElement {
@@ -72,6 +82,8 @@ export function createProjectsView(api: Api, handlers: ProjectsHandlers) {
       item(text.exportSite, () => void exportApp(project, false)),
       item(text.backUp, () => void exportApp(project, true)),
       item(text.createShortcut, () => void createShortcut(project)),
+      item(text.changeService, () => void moveService(project)),
+      item(text.resetConversation, () => void reset(project)),
       item(text.deleteApp, () => void remove(project), true),
     );
     const more = button({
@@ -90,21 +102,42 @@ export function createProjectsView(api: Api, handlers: ProjectsHandlers) {
       'button',
       { type: 'button', className: 'app-open' },
       h('span', { className: 'app-name' }, project.name),
-      h(
-        'span',
-        { className: 'app-meta' },
-        text.projectSubtitle(relativeTime(project.updatedAtMillis), providerLabel(project.provider)),
-      ),
+      h('span', { className: 'app-meta' }, text.projectSubtitle(relativeTime(project.updatedAtMillis), serviceLabel(project))),
     );
     open.addEventListener('click', () => handlers.onOpen(project.id));
     return h('article', { className: `app-card accent-${accent(project.id)}` }, open, more, menu);
   }
 
+  /** Asks for the app's name and the service and model that will make it. */
   async function newApp(): Promise<void> {
-    const name = await promptDialog(text.newApp, { label: text.name, hint: text.nameHint, confirm: text.newApp });
-    if (name === null) return;
     try {
-      handlers.onOpen((await api.createProject(name)).id);
+      const saved = await api.getSettings();
+      if (readyConnections(saved).length === 0) {
+        toast(text.noServiceReady, true);
+        return;
+      }
+      const name = h('input', { type: 'text', maxLength: 80, autocomplete: 'off' });
+      const picker = servicePicker(api, saved);
+      const choice = await showDialog(
+        text.newApp,
+        [
+          h('label', { className: 'field' }, h('span', { className: 'field-label' }, text.name), name),
+          h('p', { className: 'help' }, text.nameHint),
+          ...picker.fields,
+        ],
+        [
+          {
+            label: text.newApp,
+            kind: 'primary',
+            value: () => {
+              const service = picker.value();
+              return name.value.trim() !== '' && service ? { name: name.value.trim(), ...service } : undefined;
+            },
+          },
+        ],
+      );
+      if (choice === null) return;
+      handlers.onOpen((await api.createProject(choice.name, choice.connection, choice.model)).id);
     } catch (error) {
       toast(errorMessage(error), true);
     }
@@ -116,6 +149,26 @@ export function createProjectsView(api: Api, handlers: ProjectsHandlers) {
     try {
       await api.renameProject(project.id, name);
       await refresh();
+    } catch (error) {
+      toast(errorMessage(error), true);
+    }
+  }
+
+  async function moveService(project: Project): Promise<void> {
+    if (!(await changeService(api, project))) return;
+    try {
+      await refresh();
+    } catch (error) {
+      toast(errorMessage(error), true);
+    }
+  }
+
+  async function reset(project: Project): Promise<void> {
+    const confirmed = await confirmDialog(text.resetTitle(project.name), text.resetBody, { label: text.resetConversation });
+    if (!confirmed) return;
+    try {
+      await api.resetConversation(project.id);
+      toast(text.resetDone);
     } catch (error) {
       toast(errorMessage(error), true);
     }
@@ -171,7 +224,19 @@ export function createProjectsView(api: Api, handlers: ProjectsHandlers) {
         if (choice === null) return;
         withConversation = choice;
       }
-      handlers.onOpen((await api.importArchive(archive.path, withConversation)).id);
+      let service: ServiceChoice | null = null;
+      // App files alone don't say what service made them. With one service there is nothing to choose.
+      const saved = archive.hasProject ? null : await api.getSettings();
+      if (saved && readyConnections(saved).length > 1) {
+        const picker = servicePicker(api, saved);
+        service = await showDialog(
+          text.importServiceTitle(archive.name),
+          [h('p', {}, text.importServiceBody), ...picker.fields],
+          [{ label: text.importApp, kind: 'primary', value: picker.value }],
+        );
+        if (service === null) return;
+      }
+      handlers.onOpen((await api.importArchive(archive.path, withConversation, service)).id);
     } catch (error) {
       toast(text.importFailed(errorMessage(error)), true);
     }

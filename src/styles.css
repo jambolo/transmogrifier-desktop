@@ -628,23 +628,6 @@ textarea {
   line-height: 28px;
 }
 
-.chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.chip {
-  min-height: 32px;
-  padding: 4px 16px;
-  border: 1px solid var(--outline);
-  border-radius: 999px;
-  background: none;
-  color: var(--text);
-  font: 700 14px/20px var(--font-body);
-  cursor: pointer;
-}
-
 .fix-row {
   display: flex;
   flex-wrap: wrap;
@@ -841,6 +824,90 @@ textarea {
 
 .key-status {
   font-weight: 700;
+}
+
+.card.provider {
+  padding: 16px 24px;
+}
+
+.card.provider.open {
+  padding-bottom: 24px;
+}
+
+.provider-toggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.provider-name {
+  flex: 1;
+}
+
+.provider-status {
+  color: var(--text-muted);
+  font: 700 14px/20px var(--font-body);
+  letter-spacing: 0;
+}
+
+.provider-status.ready {
+  color: var(--success);
+}
+
+.provider-toggle .icon {
+  transition: transform var(--motion-fast) var(--ease);
+}
+
+.provider-toggle[aria-expanded='true'] .icon {
+  transform: rotate(180deg);
+}
+
+.presets {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chip {
+  min-height: 32px;
+  padding: 4px 12px;
+  border: 1px solid var(--outline);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font: 700 14px/20px var(--font-body);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease);
+}
+
+.chip:hover {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+/* The Save button lines up with the field, not with the help under it. */
+.key-form:has(.help) {
+  align-items: flex-start;
+}
+
+.key-form:has(.help) > .button {
+  margin-top: 24px;
 }
 
 /* Dialogs and messages */

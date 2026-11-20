@@ -14,11 +14,10 @@ use tokio_util::sync::CancellationToken;
 use super::prompt;
 use super::tools::{ToolExecutor, path_from_partial_input};
 use crate::llm::{
-    CompletedTurn, LlmError, LlmErrorKind, LlmProvider, ProviderId, StopReason, ToolCall, ToolResult, TurnEvent, TurnInput,
-    TurnRequest,
+    CompletedTurn, LlmError, LlmErrorKind, LlmProvider, StopReason, ToolCall, ToolResult, TurnEvent, TurnInput, TurnRequest,
 };
 use crate::project::{Conversation, NoticeKind, Project, ProjectStore, StoreError, TranscriptEntry};
-use crate::settings::Settings;
+use crate::settings::{Connection, Settings};
 
 /// The form factor this app announces to the model; see [`with_form_factor`].
 const FORM_FACTOR: &str = "desktop";
@@ -49,9 +48,12 @@ pub enum GenerationEvent {
 
 pub type EventSink<'a> = &'a (dyn Fn(GenerationEvent) + Send + Sync);
 
+/// Makes the adapter that reaches a connection.
+pub type Connector = Arc<dyn Fn(&Connection) -> Arc<dyn LlmProvider> + Send + Sync>;
+
 pub struct AgentEngine {
     store: Arc<ProjectStore>,
-    providers: HashMap<ProviderId, Arc<dyn LlmProvider>>,
+    connect: Connector,
     retry_delays: Vec<Duration>,
 }
 
@@ -78,18 +80,14 @@ struct Run {
 
 impl AgentEngine {
     /// Retries rate limits, server errors, and network failures after 2, 5, and 15 seconds.
-    pub fn new(store: Arc<ProjectStore>, providers: HashMap<ProviderId, Arc<dyn LlmProvider>>) -> Self {
-        Self::with_retry_delays(store, providers, [2, 5, 15].map(Duration::from_secs).to_vec())
+    pub fn new(store: Arc<ProjectStore>, connect: Connector) -> Self {
+        Self::with_retry_delays(store, connect, [2, 5, 15].map(Duration::from_secs).to_vec())
     }
 
-    pub fn with_retry_delays(
-        store: Arc<ProjectStore>,
-        providers: HashMap<ProviderId, Arc<dyn LlmProvider>>,
-        retry_delays: Vec<Duration>,
-    ) -> Self {
+    pub fn with_retry_delays(store: Arc<ProjectStore>, connect: Connector, retry_delays: Vec<Duration>) -> Self {
         Self {
             store,
-            providers,
+            connect,
             retry_delays,
         }
     }
@@ -114,13 +112,14 @@ impl AgentEngine {
             text: text.to_string(),
             fix_errors,
         });
-        let Some(provider) = self.providers.get(&project.provider) else {
-            // A project from a provider this version doesn't offer.
+        let Some(connection) = settings.connection_for(project.provider, project.connection.as_deref()) else {
+            // The project's connection was removed, or was saved on another install.
             if let Some(entry) = &prompt_entry {
                 store.append_transcript(project_id, entry)?;
             }
             return store.append_transcript(project_id, &TranscriptEntry::notice(NoticeKind::ProviderUnavailable));
         };
+        let provider = (self.connect)(connection);
         // A conversation from another provider can't be continued in this provider's format.
         let conversation = store
             .conversation(project_id)?

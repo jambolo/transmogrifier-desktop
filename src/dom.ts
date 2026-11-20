@@ -40,6 +40,7 @@ const ICON_PATHS = {
   settings: 'M4 7h9M17 7h3M4 17h3M11 17h9M15 4v6M9 14v6',
   stop: 'M7 7h10v10H7z',
   upload: 'M12 16V4m-5 5 5-5 5 5M4 20h16',
+  chevronDown: 'm6 9 6 6 6-6',
 } as const;
 
 export type IconName = keyof typeof ICON_PATHS;
@@ -145,7 +146,7 @@ export function showDialog<T>(title: string, body: Child[], actions: Array<Dialo
     document.body.append(dialog);
     if (modal) dialog.showModal();
     else dialog.setAttribute('open', '');
-    const field = dialog.querySelector<HTMLElement>('input, textarea');
+    const field = dialog.querySelector<HTMLElement>('input, select, textarea');
     (field ?? buttons[0])?.focus();
   });
 }

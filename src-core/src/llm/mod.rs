@@ -2,6 +2,8 @@
 //! confined to its own submodule.
 
 pub mod anthropic;
+pub mod chat_completions;
+pub mod gemini;
 mod http;
 pub mod openai;
 
@@ -12,23 +14,41 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// The supported providers. Adding one takes a variant here, an [`LlmProvider`] adapter in its own `llm`
-/// submodule, its registration in the shell, and a label in the front end's `strings.ts`.
+/// The supported wire formats. A project records the one its conversation is stored in; which service speaks
+/// it, and where, is a connection in the user's settings. Adding one takes a variant here, an [`LlmProvider`]
+/// adapter in its own `llm` submodule, its arm in [`adapter`], and a label in the front end's `strings.ts`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ProviderId {
     Anthropic,
     Openai,
+    Gemini,
+    /// Any server that speaks the Chat Completions format, hosted or local, at an address the user saves.
+    OpenaiCompatible,
 }
 
 impl ProviderId {
-    pub const ALL: [ProviderId; 2] = [ProviderId::Anthropic, ProviderId::Openai];
+    pub const ALL: [ProviderId; 4] = [
+        ProviderId::Anthropic,
+        ProviderId::Openai,
+        ProviderId::Gemini,
+        ProviderId::OpenaiCompatible,
+    ];
 
+    /// The model for new apps when the user hasn't chosen one; empty where only the user can know it.
     pub fn default_model(self) -> &'static str {
         match self {
             ProviderId::Anthropic => "claude-opus-5-5",
             ProviderId::Openai => "gpt-6.1-sol",
+            ProviderId::Gemini => "gemini-4-carbon",
+            ProviderId::OpenaiCompatible => "",
         }
+    }
+
+    /// Whether the provider is reached at an address the user saves. Such a provider needs no API key, and
+    /// the user can save any number of connections to it.
+    pub fn uses_endpoint(self) -> bool {
+        matches!(self, ProviderId::OpenaiCompatible)
     }
 }
 
@@ -51,7 +71,7 @@ pub enum Effort {
 }
 
 impl Effort {
-    /// The value both providers use on the wire.
+    /// The value Claude and OpenAI use on the wire.
     pub(crate) fn wire(self) -> &'static str {
         match self {
             Effort::Low => "low",
@@ -268,8 +288,18 @@ impl fmt::Display for LlmError {
 
 impl std::error::Error for LlmError {}
 
-/// Reads the provider's saved API key, or `None` when there isn't one.
+/// Reads a connection's saved API key, or `None` when there isn't one.
 pub type KeySource = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
+/// The adapter for one connection. `endpoint` is the connection's server address, for a provider reached at one.
+pub fn adapter(provider: ProviderId, endpoint: Option<String>, api_key: KeySource) -> Arc<dyn LlmProvider> {
+    match provider {
+        ProviderId::Anthropic => Arc::new(anthropic::AnthropicProvider::new(api_key)),
+        ProviderId::Openai => Arc::new(openai::OpenAiProvider::new(api_key)),
+        ProviderId::Gemini => Arc::new(gemini::GeminiProvider::new(api_key)),
+        ProviderId::OpenaiCompatible => Arc::new(chat_completions::ChatCompletionsProvider::new(endpoint, api_key)),
+    }
+}
 
 #[async_trait]
 pub trait LlmProvider: Send + Sync {

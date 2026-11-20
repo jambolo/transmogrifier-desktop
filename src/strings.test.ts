@@ -1,5 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { keyErrorText, noticeText, relativeTime, retryingLabel, toolLabel, usageLabel } from './strings';
+import { PROVIDERS, usesEndpoint } from './api';
+import {
+  SERVER_PRESETS,
+  connectionLabel,
+  connectionModel,
+  keyErrorText,
+  noticeText,
+  providerLabel,
+  providerServices,
+  relativeTime,
+  retryingLabel,
+  toolLabel,
+  usageLabel,
+} from './strings';
 
 describe('strings', () => {
   it('labels tool calls in progress and finished', () => {
@@ -20,6 +33,38 @@ describe('strings', () => {
     expect(keyErrorText('OPENAI', { kind: 'SERVER', network: null, status: 500, detail: null })).toBe(
       'ChatGPT had a problem on its end. Try again later. Error 500',
     );
+  });
+
+  it('explains a failed check of a server in terms of its address', () => {
+    expect(keyErrorText('OPENAI_COMPATIBLE', { kind: 'NETWORK', network: 'CONNECTION_REFUSED', status: null, detail: null })).toBe(
+      "Couldn't connect to the server. Check that it is running and that the address is right.",
+    );
+    expect(keyErrorText('OPENAI_COMPATIBLE', { kind: 'REJECTED', network: null, status: 404, detail: 'Not Found' })).toBe(
+      'The server refused the request. Check the address; it usually ends in /v1. Error 404: Not Found',
+    );
+  });
+
+  it('names every provider and the services it covers', () => {
+    expect(PROVIDERS.map(providerLabel)).toEqual(['Claude', 'ChatGPT', 'Gemini', 'OpenAI-compatible']);
+    for (const provider of PROVIDERS) {
+      const services = providerServices(provider);
+      expect(services.length).toBeGreaterThan(0);
+      // A server's services each come with an address to fill in.
+      expect(services.every((service) => (service.endpoint !== undefined) === usesEndpoint(provider))).toBe(true);
+    }
+  });
+
+  it('offers hosted and local servers to add', () => {
+    expect(SERVER_PRESETS.hosted.map((preset) => preset.name)).toContain('OpenRouter');
+    expect(SERVER_PRESETS.local.every((preset) => preset.endpoint.startsWith('http://localhost:'))).toBe(true);
+  });
+
+  it('names a connection and its model', () => {
+    const claude = { id: 'anthropic', name: '', protocol: 'ANTHROPIC', model: '' } as const;
+    const server = { id: 'c1', name: 'Ollama', protocol: 'OPENAI_COMPATIBLE', model: 'gemma4' } as const;
+    expect([connectionLabel(claude), connectionModel(claude)]).toEqual(['Claude', 'claude-opus-5-5']);
+    expect([connectionLabel(server), connectionModel(server)]).toEqual(['Ollama', 'gemma4']);
+    expect(connectionModel({ ...server, model: '' })).toBe('');
   });
 
   it('formats notices, retries, and usage', () => {
