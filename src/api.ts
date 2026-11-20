@@ -200,6 +200,14 @@ export const api = {
   importArchive(path: string, withConversation: boolean): Promise<Project> {
     return invoke<Project>('import_archive', { path, withConversation });
   },
+  /** Puts a shortcut on the desktop that opens Transmogrifier at this app. Resolves to the shortcut's path. */
+  createShortcut(id: string): Promise<string> {
+    return invoke<string>('create_shortcut', { id });
+  },
+  /** The project the shortcut that started Transmogrifier asked for, or null. Answers once. */
+  takeLaunchRequest(): Promise<string | null> {
+    return invoke<string | null>('take_launch_request');
+  },
   openExternal(url: string): Promise<void> {
     return invoke<void>('open_external', { url });
   },
@@ -216,6 +224,10 @@ export const api = {
   /** A running app asked to open a link outside itself. */
   onExternalLink(handler: (url: string) => void): Promise<Unsubscribe> {
     return subscribe<{ url: string }>('external-link', (payload) => handler(payload.url));
+  },
+  /** A shortcut opened while Transmogrifier was running asked for a project. */
+  onLaunch(handler: (projectId: string) => void): Promise<Unsubscribe> {
+    return subscribe<{ projectId: string }>('launch', (payload) => handler(payload.projectId));
   },
 };
 

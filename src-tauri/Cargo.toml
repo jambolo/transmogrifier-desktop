@@ -1,6 +1,6 @@
 [package]
 name = "transmogrifier-desktop"
-version = "1.0.1"
+version = "1.1.0"
 edition = "2024"
 description = "Tauri shell: owns the window and exposes the compute core to the web UI."
 
@@ -16,3 +16,7 @@ tauri-plugin-dialog = "2.8.4"
 tauri-plugin-opener = "2.7.3"
 tokio-util = "0.7.20"
 keyring = "4.2.0"
+tauri-plugin-single-instance = "2.5.5"
+
+[target."cfg(windows)".dependencies]
+windows = { version = "0.62", features = ["Win32_System_Com", "Win32_UI_Shell"] }

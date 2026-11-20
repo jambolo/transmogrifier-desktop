@@ -12,6 +12,7 @@
 
 mod runner;
 mod secrets;
+mod shortcut;
 
 use std::collections::HashMap;
 use std::fs;
@@ -46,10 +47,12 @@ pub struct AppState {
     /// Generations in progress, by project ID.
     generations: Mutex<HashMap<String, CancellationToken>>,
     pub runners: Runners,
+    /// The project a shortcut asked to open, until the front end takes it.
+    launch: Mutex<Option<String>>,
 }
 
 impl AppState {
-    fn new(data_dir: &Path) -> Self {
+    fn new(data_dir: &Path, launch: Option<String>) -> Self {
         let store = Arc::new(ProjectStore::new(data_dir.join("projects")));
         let settings = Arc::new(SettingsStore::new(
             data_dir.join("settings.json"),
@@ -77,6 +80,7 @@ impl AppState {
             engine,
             generations: Mutex::default(),
             runners: Runners::default(),
+            launch: Mutex::new(launch),
         }
     }
 
@@ -162,6 +166,13 @@ struct GenerationProgress {
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct GenerationFinished {
+    project_id: String,
+}
+
+/// A shortcut launched while the app was running asked to open a project.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct Launch {
     project_id: String,
 }
 
@@ -338,14 +349,19 @@ fn get_console(app: AppHandle, id: String) -> ConsoleView {
     runner::console(&app, &id)
 }
 
-/// A file name for an export: the app's name without characters file systems reject.
-fn export_file_name(name: &str, backup: bool) -> String {
+/// The app's name without characters file systems reject, or `fallback` if nothing is left.
+fn safe_file_name(name: &str, fallback: &str) -> String {
     let safe: String = name
         .chars()
         .map(|c| if c.is_control() || "\\/:*?\"<>|".contains(c) { '_' } else { c })
         .collect();
     let safe: String = safe.trim().chars().take(60).collect();
-    let safe = if safe.is_empty() { "app" } else { safe.as_str() };
+    if safe.is_empty() { fallback.to_string() } else { safe }
+}
+
+/// A file name for an export.
+fn export_file_name(name: &str, backup: bool) -> String {
+    let safe = safe_file_name(name, "app");
     if backup {
         format!("{safe} backup.zip")
     } else {
@@ -424,6 +440,26 @@ async fn import_archive(app: AppHandle, path: String, with_conversation: bool) -
     .await
 }
 
+/// Puts a shortcut on the desktop that opens Transmogrifier at this app. Returns the shortcut's path.
+#[tauri::command]
+async fn create_shortcut(app: AppHandle, id: String) -> CommandResult<String> {
+    blocking(move || {
+        let state = app.state::<AppState>();
+        let project = state.store.project(&id).ok_or("This app no longer exists")?;
+        let desktop = app.path().desktop_dir().map_err(text)?;
+        let data_dir = app.path().app_data_dir().map_err(text)?;
+        let path = shortcut::create(&desktop, &data_dir, &project.id, &project.name)?;
+        Ok(path.to_string_lossy().into_owned())
+    })
+    .await
+}
+
+/// The project the shortcut that started Transmogrifier asked for, once.
+#[tauri::command]
+fn take_launch_request(state: State<'_, AppState>) -> Option<String> {
+    state.launch.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
+}
+
 /// Opens a link from a generated app in the system browser, after the user agreed.
 #[tauri::command]
 fn open_external(app: AppHandle, url: String) -> CommandResult<()> {
@@ -460,9 +496,21 @@ fn main() {
         export_project,
         pick_archive,
         import_archive,
+        create_shortcut,
+        take_launch_request,
         open_external
     ]);
     tauri::Builder::default()
+        // A second launch (from a shortcut, say) goes to the running copy instead of starting another.
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+            if let Some(project_id) = shortcut::requested_project(&args) {
+                let _ = app.emit_to(MAIN_WINDOW, "launch", Launch { project_id });
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .register_uri_scheme_protocol(runner::SCHEME, |context, request| {
@@ -471,7 +519,8 @@ fn main() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             fs::create_dir_all(&data_dir)?;
-            app.manage(AppState::new(&data_dir));
+            let args: Vec<String> = std::env::args().collect();
+            app.manage(AppState::new(&data_dir, shortcut::requested_project(&args)));
             Ok(())
         })
         // Generated apps run in their own windows and must never reach the app's commands.
@@ -557,6 +606,12 @@ mod tests {
             serde_json::to_value(GenerationEvent::TurnPersisted).unwrap(),
             json!({"type": "turnPersisted"})
         );
+    }
+
+    #[test]
+    fn launch_serializes_to_the_wire_shape_the_frontend_expects() {
+        let launch = Launch { project_id: "p1".into() };
+        assert_eq!(serde_json::to_value(&launch).unwrap(), json!({"projectId": "p1"}));
     }
 
     #[test]

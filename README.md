@@ -57,6 +57,7 @@ Click an app on the **Your apps** screen to open it. The **⋮** button on each 
 - **Rename**: the model uses your app's name, and picks up a new name on your next request.
 - **Export app files**: saves a zip of the app alone, ready to host anywhere.
 - **Back up**: saves a zip of the app with its conversation.
+- **Add desktop shortcut**: a shortcut that opens Transmogrifier straight to the app, or to its chat if nothing has been made yet.
 - **Delete app**.
 
 **Import app** opens either kind of zip as a new app. A backup can be imported with or without its conversation. Each app keeps the service and model it was created with.

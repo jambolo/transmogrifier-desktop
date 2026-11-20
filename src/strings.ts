@@ -21,6 +21,7 @@ export const text = {
   // Projects
   yourApps: 'Your apps',
   appsLifecycle: 'Your apps stay until you delete them.',
+  version: (version: string) => `Version ${version}`,
   newApp: 'New app',
   importApp: 'Import app',
   emptyAppsTitle: 'What needs a little app?',
@@ -30,6 +31,10 @@ export const text = {
   moreOptions: (name: string) => `More options for ${name}`,
   exportSite: 'Export app files',
   backUp: 'Back up',
+  createShortcut: 'Add desktop shortcut',
+  shortcutCreated: 'Added a shortcut to your desktop.',
+  shortcutFailed: (detail: string) => `Couldn't add the shortcut: ${detail}`,
+  shortcutAppMissing: 'The app this shortcut opens no longer exists.',
   deleteApp: 'Delete app',
   keepApp: 'Keep app',
   deleteTitle: (name: string) => `Delete “${name}”?`,

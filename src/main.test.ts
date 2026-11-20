@@ -11,6 +11,7 @@ const events = vi.hoisted(() => ({
   finished: undefined as Handler<string> | undefined,
   runner: undefined as Handler<RunnerStatus> | undefined,
   link: undefined as Handler<string> | undefined,
+  launch: undefined as Handler<string> | undefined,
 }));
 
 const mockApi = vi.hoisted(() => ({
@@ -34,10 +35,13 @@ const mockApi = vi.hoisted(() => ({
   pickArchive: vi.fn(),
   importArchive: vi.fn(),
   openExternal: vi.fn(),
+  createShortcut: vi.fn(),
+  takeLaunchRequest: vi.fn(),
   onGeneration: vi.fn(),
   onGenerationFinished: vi.fn(),
   onRunner: vi.fn(),
   onExternalLink: vi.fn(),
+  onLaunch: vi.fn(),
 }));
 
 vi.mock('./api', () => ({
@@ -141,6 +145,10 @@ beforeEach(() => {
   mockApi.onExternalLink.mockImplementation(async (handler: Handler<string>) => {
     events.link = handler;
   });
+  mockApi.onLaunch.mockImplementation(async (handler: Handler<string>) => {
+    events.launch = handler;
+  });
+  mockApi.takeLaunchRequest.mockResolvedValue(null);
 });
 
 describe('start', () => {
@@ -158,6 +166,39 @@ describe('start', () => {
     expect(app().querySelector('.app-meta')?.textContent).toBe('Edited just now · Claude');
   });
 
+  it('opens the app a shortcut asked for', async () => {
+    mockApi.takeLaunchRequest.mockResolvedValue('p1');
+    mockApi.getProject.mockResolvedValue(view({ files: [{ path: 'index.html', sizeBytes: 10 }] }));
+    await boot();
+    expect(app().querySelector('h1')?.textContent).toBe('Tip jar');
+    expect(mockApi.runApp).toHaveBeenCalledWith('p1');
+  });
+
+  it('opens the chat when a shortcut’s app has no files yet', async () => {
+    mockApi.takeLaunchRequest.mockResolvedValue('p1');
+    mockApi.getProject.mockResolvedValue(view());
+    await boot();
+    expect(app().querySelector('h1')?.textContent).toBe('Tip jar');
+    expect(mockApi.runApp).not.toHaveBeenCalled();
+  });
+
+  it('lists the apps with an error when a shortcut’s app is gone', async () => {
+    mockApi.takeLaunchRequest.mockResolvedValue('p9');
+    mockApi.getProject.mockRejectedValue('This app no longer exists');
+    await boot();
+    expect(app().querySelector('h1')?.textContent).toBe('Your apps');
+    expect(document.querySelector('.toast.error')?.textContent).toContain('The app this shortcut opens no longer exists.');
+  });
+
+  it('opens the app a shortcut asks for while running', async () => {
+    mockApi.getProject.mockResolvedValue(view({ files: [{ path: 'index.html', sizeBytes: 10 }] }));
+    await boot();
+    events.launch!('p1');
+    await flush();
+    expect(app().querySelector('h1')?.textContent).toBe('Tip jar');
+    expect(mockApi.runApp).toHaveBeenCalledWith('p1');
+  });
+
   it('invites a first app when there are none', async () => {
     mockApi.listProjects.mockResolvedValue([]);
     await boot();
@@ -166,6 +207,11 @@ describe('start', () => {
 });
 
 describe('projects', () => {
+  it('shows the app version in the footer', async () => {
+    await boot();
+    expect(app().querySelector('footer')?.textContent).toBe(`Version ${__APP_VERSION__}`);
+  });
+
   it('creates an app from the name dialog and opens it', async () => {
     mockApi.createProject.mockResolvedValue(project);
     mockApi.getProject.mockResolvedValue(view());
@@ -178,6 +224,16 @@ describe('projects', () => {
     expect(mockApi.createProject).toHaveBeenCalledWith('Tip jar');
     expect(app().querySelector('h1')?.textContent).toBe('Tip jar');
     expect(app().textContent).toContain('Claude · claude-opus-5-5');
+  });
+
+  it('adds a desktop shortcut from the menu', async () => {
+    mockApi.createShortcut.mockResolvedValue('/home/me/Desktop/transmogrifier-p1.desktop');
+    await boot();
+    click('More options for Tip jar');
+    click('Add desktop shortcut');
+    await flush();
+    expect(mockApi.createShortcut).toHaveBeenCalledWith('p1');
+    expect(document.querySelector('.toast')?.textContent).toContain('Added a shortcut to your desktop.');
   });
 
   it('deletes an app only after confirmation', async () => {
