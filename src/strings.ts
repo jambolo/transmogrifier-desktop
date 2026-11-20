@@ -21,6 +21,7 @@ export const text = {
   // Projects
   yourApps: 'Your apps',
   appsLifecycle: 'Your apps stay until you delete them.',
+  version: (version: string) => `Version ${version}`,
   newApp: 'New app',
   importApp: 'Import app',
   emptyAppsTitle: 'What needs a little app?',

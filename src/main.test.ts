@@ -207,6 +207,11 @@ describe('start', () => {
 });
 
 describe('projects', () => {
+  it('shows the app version in the footer', async () => {
+    await boot();
+    expect(app().querySelector('footer')?.textContent).toBe(`Version ${__APP_VERSION__}`);
+  });
+
   it('creates an app from the name dialog and opens it', async () => {
     mockApi.createProject.mockResolvedValue(project);
     mockApi.getProject.mockResolvedValue(view());

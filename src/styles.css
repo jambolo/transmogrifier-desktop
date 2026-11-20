@@ -367,6 +367,13 @@ textarea {
   margin: 0 auto;
 }
 
+.view-footer {
+  margin-top: auto;
+  padding-top: 32px;
+  font-size: 12px;
+  text-align: right;
+}
+
 .app-card {
   position: relative;
   display: flex;

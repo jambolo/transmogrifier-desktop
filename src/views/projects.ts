@@ -35,6 +35,7 @@ export function createProjectsView(api: Api, handlers: ProjectsHandlers) {
       ),
     ),
     list,
+    h('footer', { className: 'view-footer muted' }, text.version(__APP_VERSION__)),
   );
 
   async function refresh(): Promise<void> {
